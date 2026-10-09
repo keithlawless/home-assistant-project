@@ -9,6 +9,8 @@ export const devices = writable([]);
 export const found = writable([]);
 export const lists = writable({});
 export const scenes = writable([]);
+export const schedules = writable([]);
+export const alerts = writable([]);
 // Screen mode pushed by core: 'night' (black until touched) or 'on'.
 export const screenMode = writable('on');
 // Each voice event from taco-voice: {type: 'state'|'heard'|'tool'|'reply', ...}
@@ -24,6 +26,14 @@ function handle(msg) {
       found.set(msg.found ?? []);
       lists.set(msg.lists ?? {});
       scenes.set(msg.scenes ?? []);
+      schedules.set(msg.schedules ?? []);
+      alerts.set(msg.alerts ?? []);
+      break;
+    case 'schedules':
+      schedules.set(msg.schedules);
+      break;
+    case 'alerts':
+      alerts.set(msg.alerts);
       break;
     case 'lists':
       lists.set(msg.lists);
@@ -110,3 +120,4 @@ export const toggleItem = (id, done) => post(`/api/lists/items/${id}`, { done },
 export const deleteItem = (id) => post(`/api/lists/items/${id}`, undefined, 'DELETE');
 export const clearDone = (name) => post(`/api/lists/${encodeURIComponent(name)}?done_only=true`, undefined, 'DELETE');
 export const runScene = (name) => post(`/api/scenes/${encodeURIComponent(name)}/run`);
+export const setScheduleEnabled = (id, enabled) => post(`/api/schedules/${id}`, { enabled }, 'PATCH');

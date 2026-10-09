@@ -3,7 +3,7 @@
   // Laid out for the 1024x600 Kogoda panel.
   import WeatherIcon from './WeatherIcon.svelte';
   import TimerChips from './TimerChips.svelte';
-  import { weather, settings } from './store.js';
+  import { weather, settings, alerts } from './store.js';
   import { now, formatTime, ampm, formatDate, hourLabel, dayLabel } from './time.js';
 
   let { onSettings, onDevices, onLists } = $props();
@@ -14,6 +14,16 @@
 </script>
 
 <main class="home">
+  {#if $alerts.length}
+    <div class="alert" class:severe={['Severe', 'Extreme'].includes($alerts[0].severity)}>
+      <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.2"
+           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M12 3 2 20h20zM12 10v4M12 17h.01" />
+      </svg>
+      <span>{$alerts[0].headline}</span>
+      {#if $alerts.length > 1}<span class="more">+{$alerts.length - 1} more</span>{/if}
+    </div>
+  {/if}
   <section class="top">
     <div class="current">
       {#if w}
@@ -94,10 +104,18 @@
     height: 100%;
     padding: 20px 24px;
     display: grid;
-    grid-template-rows: 1fr auto auto auto;
+    grid-template-rows: auto 1fr auto auto auto;
     gap: 12px;
   }
   .top { display: flex; justify-content: space-between; }
+  .alert {
+    display: flex; align-items: center; gap: 10px;
+    background: #78350f; color: #fef3c7; border-radius: 12px; padding: 8px 14px; font-size: 17px;
+    white-space: nowrap; overflow: hidden;
+  }
+  .alert span:first-of-type { overflow: hidden; text-overflow: ellipsis; }
+  .alert.severe { background: #991b1b; color: #fee2e2; }
+  .alert .more { margin-left: auto; opacity: 0.8; }
 
   .now { display: flex; align-items: center; gap: 8px; margin-left: -10px; }
   .temp { font-size: 120px; font-weight: 300; line-height: 1; letter-spacing: -4px; }

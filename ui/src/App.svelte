@@ -36,6 +36,20 @@
     }
   });
 
+  function inNightHours(nh) {
+    if (!nh?.enabled) return false;
+    const now = new Date();
+    const mins = now.getHours() * 60 + now.getMinutes();
+    const toMins = (hhmm) => { const [h, m] = hhmm.split(':').map(Number); return h * 60 + m; };
+    const start = toMins(nh.start);
+    const end = toMins(nh.end);
+    return start <= end ? mins >= start && mins < end : mins >= start || mins < end;
+  }
+
+  function closeSheets() {
+    showSettings = showDevices = showLists = false;
+  }
+
   function wakeFromNight() {
     night = false;
     activity();
@@ -72,7 +86,12 @@
 
     const idleCheck = setInterval(() => {
       const minutes = $settings?.screensaver_minutes ?? 5;
-      if (!saverOn && Date.now() - lastActivity > minutes * 60_000) {
+      if (!saverOn && !night && Date.now() - lastActivity > minutes * 60_000) {
+        if (inNightHours($settings?.night_hours)) {
+          night = true;   // fully dark overnight instead of the clock screensaver
+          closeSheets();
+          return;
+        }
         saverOn = true;
         showSettings = false;
         showDevices = false;

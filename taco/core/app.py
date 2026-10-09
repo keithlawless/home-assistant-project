@@ -22,6 +22,7 @@ from fastapi.staticfiles import StaticFiles
 from taco.config import load_config
 from taco.voices import VOICES, is_known
 
+from .alerts import fetch_alerts
 from .assistant import Assistant
 from .db import Database
 from .devices.base import DeviceError
@@ -32,6 +33,7 @@ from .hub import Hub
 from .intents import normalize, parse_clock
 from .lists import ListStore
 from .scenes import SceneStore, scene_key
+from .scheduler import Scheduler, ScheduleStore, describe
 from .weather import fetch_forecast, geocode, locate_by_ip
 
 log = logging.getLogger("taco.core")
@@ -39,6 +41,7 @@ log = logging.getLogger("taco.core")
 UI_DIST = Path(__file__).resolve().parents[2] / "ui" / "dist"
 WEATHER_REFRESH_S = 600
 WEATHER_RETRY_S = 60
+ALERTS_REFRESH_S = 300
 
 
 class State:
@@ -62,7 +65,44 @@ class State:
         self.lists = ListStore(self.db.conn, self.db.lock)
         self.scenes = SceneStore(self.db.conn, self.db.lock)
         self.media = None   # radio player, added with music support
+        self.alerts: list[dict[str, Any]] = []
+        self._announced_alerts: set[str] = set()
+        self.schedules = ScheduleStore(self.db.conn, self.db.lock)
+        self.scheduler = Scheduler(
+            self.schedules,
+            run_actions=self.run_actions,
+            sun=lambda: self.weather["today"] if self.weather else None,
+            vacation=lambda: bool(self.db.settings()["vacation_mode"]),
+            vacation_devices=lambda: [d["id"] for d in self.devices.registry.all()
+                                      if d["kind"] in ("light", "plug", "dimmer")],
+            set_power=self._vacation_power,
+        )
         self.assistant = Assistant(self)
+
+    async def _vacation_power(self, ids: list[int], on: bool) -> None:
+        await self.devices.control(ids, "power", on)
+
+    def schedules_payload(self) -> list[dict[str, Any]]:
+        return [{**s, "description": describe(s)} for s in self.schedules.all()]
+
+    async def announce(self, text: str) -> None:
+        """Have taco-voice chime and speak `text` (alerts, scheduled reminders)."""
+        await self.hub.broadcast({"type": "announce", "text": text})
+
+    async def alerts_loop(self) -> None:
+        while True:
+            try:
+                loc = self.db.settings()["location"]
+                if loc:
+                    self.alerts = await fetch_alerts(self.http, loc["lat"], loc["lon"])
+                    await self.hub.broadcast({"type": "alerts", "alerts": self.alerts})
+                    for a in self.alerts:
+                        if a["announce"] and a["id"] not in self._announced_alerts:
+                            self._announced_alerts.add(a["id"])
+                            await self.announce(f"Weather alert. {a['headline']}.")
+            except (httpx.HTTPError, ValueError, KeyError) as e:
+                log.warning("weather alerts refresh failed: %s", e)
+            await asyncio.sleep(ALERTS_REFRESH_S)
 
     def lists_payload(self) -> dict[str, list[dict[str, Any]]]:
         return {name: self.lists.items(name) for name in self.lists.names()}
@@ -76,8 +116,20 @@ class State:
 
     async def run_scene(self, scene: dict[str, Any]) -> str:
         """Carry out a scene's actions; return what Taco should say."""
-        speech, failed = [], []
-        for action in scene["actions"]:
+        speech, failed = await self.run_actions(scene["actions"])
+        key = scene_key(scene["name"])
+        if not speech:
+            speech.append({"good night": "Good night!",
+                           "i m leaving": "Goodbye! I've turned everything off."}.get(key, "Done."))
+        if failed:
+            speech.append(f"{', '.join(failed)} didn't respond.")
+        return " ".join(speech)
+
+    async def run_actions(self, actions: list[dict[str, Any]]) -> tuple[list[str], list[str]]:
+        """Run scene/schedule actions. Returns (things to say, devices that failed)."""
+        speech: list[str] = []
+        failed: list[str] = []
+        for action in actions:
             kind = action.get("type")
             if kind == "devices":
                 if "ids" in action:
@@ -96,13 +148,16 @@ class State:
                 await self.set_screen("night")
             elif kind == "media_stop" and self.media:
                 await self.media.stop()
-        key = scene_key(scene["name"])
-        if not speech:
-            speech.append({"good night": "Good night!",
-                           "i m leaving": "Goodbye! I've turned everything off."}.get(key, "Done."))
-        if failed:
-            speech.append(f"{', '.join(failed)} didn't respond.")
-        return " ".join(speech)
+            elif kind == "scene" and (scene := self.scenes.get(action.get("name", ""))):
+                more, bad = await self.run_actions(scene["actions"])
+                speech += more
+                failed += bad
+            elif kind == "alarm":
+                self.db.timers.add_alarm(time.time(), action.get("label"))
+                await self.broadcast_timers()
+            elif kind == "say" and action.get("text"):
+                await self.announce(action["text"])
+        return speech, failed
 
 
     async def on_devices_changed(self) -> None:
@@ -120,7 +175,7 @@ class State:
         return {"weather": self.weather, "settings": self.db.settings(), "voice": self.voice,
                 "timers": self.timers_payload(), "devices": self.devices.payload(),
                 "found": self.devices.found_payload(), "lists": self.lists_payload(),
-                "scenes": self.scenes.all()}
+                "scenes": self.scenes.all(), "schedules": self.schedules_payload(), "alerts": self.alerts}
 
     async def broadcast_timers(self) -> None:
         await self.hub.broadcast({"type": "timers", "timers": self.timers_payload()})
@@ -164,7 +219,8 @@ async def lifespan(app: FastAPI):
     global state
     state = State()
     tasks = [asyncio.create_task(c) for c in (
-        state.weather_loop(), state.timer_loop(), state.matter.run(), state.devices.poll_loop())]
+        state.weather_loop(), state.timer_loop(), state.matter.run(), state.devices.poll_loop(),
+        state.scheduler.loop(), state.alerts_loop())]
     yield
     for task in tasks:
         task.cancel()
@@ -522,6 +578,58 @@ async def run_scene(name: str) -> dict[str, str]:
     if scene is None:
         raise HTTPException(404, f"no scene {name!r}")
     return {"speech": await state.run_scene(scene)}
+
+
+# --- schedules and alerts ----------------------------------------------------------
+
+@app.get("/api/schedules")
+async def list_schedules() -> list[dict[str, Any]]:
+    return state.schedules_payload()
+
+
+@app.post("/api/schedules")
+async def add_schedule(body: dict[str, Any]) -> dict[str, Any]:
+    """body: {"name", "trigger": {"at": "HH:MM"} | {"sun": "sunset", "offset_min": -15},
+    "days": [0-6, Monday = 0; empty = daily], "actions": [...]} (see scheduler.py)."""
+    try:
+        s = state.schedules.add(str(body["name"]), body["trigger"], list(body.get("days", [])),
+                                list(body["actions"]))
+    except (KeyError, ValueError, TypeError) as e:
+        raise HTTPException(400, f"bad schedule: {e}") from None
+    await state.hub.broadcast({"type": "schedules", "schedules": state.schedules_payload()})
+    return {**s, "description": describe(s)}
+
+
+@app.patch("/api/schedules/{schedule_id}")
+async def update_schedule(schedule_id: int, body: dict[str, Any]) -> dict[str, bool]:
+    changes = {k: v for k, v in body.items() if k in ("name", "trigger", "days", "actions", "enabled")}
+    try:
+        state.schedules.update(schedule_id, **changes)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+    await state.hub.broadcast({"type": "schedules", "schedules": state.schedules_payload()})
+    return {"ok": True}
+
+
+@app.delete("/api/schedules/{schedule_id}")
+async def delete_schedule(schedule_id: int) -> dict[str, bool]:
+    state.schedules.delete(schedule_id)
+    await state.hub.broadcast({"type": "schedules", "schedules": state.schedules_payload()})
+    return {"ok": True}
+
+
+@app.get("/api/alerts")
+async def get_alerts() -> list[dict[str, Any]]:
+    return state.alerts
+
+
+@app.post("/api/announce")
+async def announce(body: dict[str, Any]) -> dict[str, bool]:
+    """Speak a message out loud in the kitchen (intercom, reminders from Hermes)."""
+    if not str(body.get("text", "")).strip():
+        raise HTTPException(400, "nothing to say")
+    await state.announce(str(body["text"]))
+    return {"ok": True}
 
 
 @app.post("/api/screen")

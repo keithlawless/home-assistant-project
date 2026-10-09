@@ -23,6 +23,9 @@ SETTINGS_DEFAULTS: dict[str, Any] = {
     "voice": None,                # "engine:voice" from taco.voices; None = config default
     "wake_sensitivity": "medium", # low | medium | high
     "mic_muted": False,           # "stop listening": wake word ignored until unmuted
+    "vacation_mode": False,       # random lamps in the evening while away
+    # Screen goes fully dark when idle during these hours (instead of the clock).
+    "night_hours": {"enabled": False, "start": "22:30", "end": "06:30"},
 }
 
 

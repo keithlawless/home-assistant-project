@@ -2,7 +2,7 @@
   // Settings sheet: voice, wake sensitivity, location, units, clock format,
   // screensaver timeout.
   import { onMount } from 'svelte';
-  import { settings, saveSettings, searchPlaces } from './store.js';
+  import { settings, saveSettings, searchPlaces, schedules, setScheduleEnabled } from './store.js';
 
   const DEFAULT_VOICE = 'piper:en_US-lessac-medium';
   let voices = $state([]);
@@ -12,6 +12,13 @@
     const r = await fetch('/api/voices');
     if (r.ok) voices = await r.json();
   });
+
+  // "22:30" + 30 -> "23:00", wrapping around midnight.
+  function shift(hhmm, minutes) {
+    const [h, m] = hhmm.split(':').map(Number);
+    const t = (h * 60 + m + minutes + 1440) % 1440;
+    return `${String(Math.floor(t / 60)).padStart(2, '0')}:${String(t % 60).padStart(2, '0')}`;
+  }
 
   async function preview(id) {
     previewing = id;
@@ -102,6 +109,36 @@
       </div>
 
       <div class="row">
+        <div class="name">Vacation mode<div class="sub">Lamps go on and off at random in the evening</div></div>
+        <div class="seg">
+          <button class:on={!s.vacation_mode} onclick={() => save({ vacation_mode: false })}>Off</button>
+          <button class:on={s.vacation_mode} onclick={() => save({ vacation_mode: true })}>On</button>
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="name">Night hours<div class="sub">Screen goes fully dark when idle, {s.night_hours.start}–{s.night_hours.end}</div></div>
+        <div class="seg">
+          <button class:on={!s.night_hours.enabled} onclick={() => save({ night_hours: { ...s.night_hours, enabled: false } })}>Off</button>
+          <button class:on={s.night_hours.enabled} onclick={() => save({ night_hours: { ...s.night_hours, enabled: true } })}>On</button>
+        </div>
+      </div>
+      {#if s.night_hours.enabled}
+        <div class="row">
+          <div class="name">Night starts / ends</div>
+          <div class="stepper">
+            <button onclick={() => save({ night_hours: { ...s.night_hours, start: shift(s.night_hours.start, -30) } })}>−</button>
+            <span>{s.night_hours.start}</span>
+            <button onclick={() => save({ night_hours: { ...s.night_hours, start: shift(s.night_hours.start, 30) } })}>+</button>
+            <span class="gap"></span>
+            <button onclick={() => save({ night_hours: { ...s.night_hours, end: shift(s.night_hours.end, -30) } })}>−</button>
+            <span>{s.night_hours.end}</span>
+            <button onclick={() => save({ night_hours: { ...s.night_hours, end: shift(s.night_hours.end, 30) } })}>+</button>
+          </div>
+        </div>
+      {/if}
+
+      <div class="row">
         <div class="name">Location<div class="sub">{s.location?.name ?? 'Not set'}</div></div>
         <form onsubmit={search}>
           <input bind:value={query} placeholder="City or ZIP code" />
@@ -137,6 +174,22 @@
         </div>
       </div>
     </div>
+    <h2>Schedules</h2>
+    {#if $schedules.length}
+      <div class="rows">
+        {#each $schedules as sc (sc.id)}
+          <div class="row">
+            <div class="name">{sc.name}<div class="sub">{sc.description}</div></div>
+            <div class="seg">
+              <button class:on={!sc.enabled} onclick={() => setScheduleEnabled(sc.id, false)}>Paused</button>
+              <button class:on={sc.enabled} onclick={() => setScheduleEnabled(sc.id, true)}>On</button>
+            </div>
+          </div>
+        {/each}
+      </div>
+    {:else}
+      <div class="sub">No schedules yet. Try “Hey Taco, turn on the living room lamps every day at sunset.”</div>
+    {/if}
     {#if error}<div class="error">{error}</div>{/if}
   {/if}
 </div>
@@ -179,5 +232,6 @@
   .stepper { display: flex; align-items: center; gap: 14px; }
   .stepper button { width: 52px; font-size: 24px; padding: 6px 0; }
   .stepper span { min-width: 70px; text-align: center; }
+  .stepper .gap { min-width: 20px; }
   .error { color: #f87171; margin-top: 12px; }
 </style>

@@ -32,6 +32,7 @@ from .wake import WakeWord
 log = logging.getLogger("taco.voice")
 
 WAKE_CHIME = tone([660, 880], duration=0.15, volume=0.4)
+ANNOUNCE_CHIME = tone([523, 659, 784], duration=0.16, volume=0.4)
 ERROR_REPLY = "Sorry, I'm having trouble reaching my brain right now."
 WAKE_THRESHOLDS = {"low": 0.7, "medium": 0.5, "high": 0.35}
 
@@ -124,6 +125,7 @@ class VoiceLoop:
         self.events = Events(cfg["core"]["url"])
         self.cancel = threading.Event()   # stop button or barge-in
         self.muted = False                 # "stop listening" privacy mode
+        self.announcer = Speaker(audio["output_device"])   # alerts, scheduled messages
         self.alarm = AlarmPlayer(Speaker(audio["output_device"]), self.synthesize)
         self.core = CoreLink(cfg["core"]["url"], self._on_core_message)
 
@@ -171,8 +173,18 @@ class VoiceLoop:
         except Exception:
             log.exception("preview of %s failed", voice_id)
 
+    def _announce(self, text: str) -> None:
+        try:
+            self.announcer.play(ANNOUNCE_CHIME, 22050)
+            self.announcer.play(*self.synthesize(text))
+            log.info("announced: %r", text)
+        except Exception:
+            log.exception("announcement failed")
+
     def _on_core_message(self, msg: dict[str, Any]) -> None:
         kind = msg.get("type")
+        if kind == "announce" and msg.get("text"):
+            threading.Thread(target=self._announce, args=(msg["text"],), daemon=True).start()
         if kind in ("timers", "snapshot"):
             self.alarm.update(msg.get("timers") or [])
         if kind in ("settings", "snapshot") and msg.get("settings"):

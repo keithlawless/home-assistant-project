@@ -322,6 +322,68 @@ def daily_briefing() -> str:
     return _call("POST", "/api/intent", json={"text": "what's my briefing"})["speech"]
 
 
+# --- schedules, vacation mode, alerts, announcements -------------------------------
+
+@mcp.tool()
+def list_schedules() -> list[dict]:
+    """Automations that run on a schedule, with a plain-English description of each."""
+    return [{"id": x["id"], "name": x["name"], "when": x["description"], "enabled": x["enabled"],
+             "actions": x["actions"]} for x in _call("GET", "/api/schedules")]
+
+
+@mcp.tool()
+def add_schedule(name: str, actions: list[dict], time: str | None = None, sun: str | None = None,
+                 offset_minutes: int = 0, days: list[int] | None = None) -> dict:
+    """Create an automation that runs every chosen day at a clock time
+    (time="18:30", 24-hour) or relative to the sun (sun="sunset"|"sunrise",
+    offset_minutes=-15 for 15 minutes before). days: 0=Monday ... 6=Sunday;
+    omit for every day ([0,1,2,3,4] = weekdays). Actions:
+    {"type": "scene", "name": "good night"}
+    {"type": "devices", "target": "living room", "on": true}
+    {"type": "alarm", "label": "work"}             (ring an alarm; for recurring wake-ups)
+    {"type": "say", "text": "Time to take out the trash"}   (spoken announcement)
+    Confirm the schedule back to the user in plain words."""
+    trigger: dict[str, Any] = {"at": time} if time else {"sun": sun or "sunset", "offset_min": offset_minutes}
+    x = _call("POST", "/api/schedules", json={"name": name, "trigger": trigger, "days": days or [],
+                                               "actions": actions})
+    return {"id": x["id"], "name": x["name"], "when": x["description"]}
+
+
+@mcp.tool()
+def set_schedule_enabled(schedule_id: int, enabled: bool) -> str:
+    """Pause or resume a schedule without deleting it."""
+    _call("PATCH", f"/api/schedules/{schedule_id}", json={"enabled": enabled})
+    return "Updated."
+
+
+@mcp.tool()
+def delete_schedule(schedule_id: int) -> str:
+    """Delete a schedule. Confirm with the user first."""
+    _call("DELETE", f"/api/schedules/{schedule_id}")
+    return "Deleted."
+
+
+@mcp.tool()
+def set_vacation_mode(on: bool) -> str:
+    """Vacation mode: while away, lamps switch on and off at random from
+    sunset until about 11 PM so the house looks lived in."""
+    _call("PUT", "/api/settings", json={"vacation_mode": on})
+    return f"Vacation mode {'on' if on else 'off'}."
+
+
+@mcp.tool()
+def get_weather_alerts() -> list[dict]:
+    """Active National Weather Service alerts for the house (US only)."""
+    return _call("GET", "/api/alerts")
+
+
+@mcp.tool()
+def announce(text: str) -> str:
+    """Speak a message out loud in the kitchen, e.g. "Dinner is ready!"."""
+    _call("POST", "/api/announce", json={"text": text})
+    return "Announced."
+
+
 # --- Taco itself ----------------------------------------------------------------
 
 @mcp.tool()
