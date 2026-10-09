@@ -175,3 +175,23 @@ A common `TTSEngine` interface streams sentence by sentence, so speech starts be
   - Change the voice and hear the new one.
   - Leave the screen idle → screensaver after the timeout → touch wakes it without triggering a button.
 - **Soak test:** run for 48 h while checking for memory growth, wake-word false accepts per hour and recovery after a Wi-Fi drop or reboot.
+
+## Future features (deferred)
+
+- **Spotify voice control** (requested 2026-10-09). Today Taco is only a
+  passive Spotify Connect speaker ("Taco" in the Spotify app). Add playback
+  on request through the Spotify Web API: "play Miles Davis on Spotify",
+  "play my Discover Weekly", pause / resume / skip / back, "what's playing?"
+  for anything on the account, and track and album details on the
+  Now Playing chip.
+  - Needs from the household: a Spotify developer app (Client ID and Secret,
+    stored in `/srv/taco/config.toml`, never the repo), a one-time browser
+    login to authorize playback control, and Premium.
+  - Build: OAuth token store with refresh in taco-core; search and play on
+    the librespot device ("Taco") by device id; fast-path intents for
+    "play X on Spotify" and the transport controls; MCP tools so Hermes
+    handles vaguer asks ("something chill for dinner").
+  - Caveat: Spotify's development-mode limits allow only a few accounts
+    to use the app, which is fine for one household.
+- **Telegram remote control** (deferred 2026-10-09). Text Taco from a phone
+  through the Hermes Telegram gateway; needs a bot token from @BotFather.
