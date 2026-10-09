@@ -14,16 +14,6 @@ log = logging.getLogger(__name__)
 
 VOICES_DIR = TACO_HOME / "voices" / "piper"
 
-# Curated defaults offered in the voice picker (downloaded on first use).
-CATALOG = {
-    "en_US-lessac-medium": "Lessac (US, warm, neutral)",
-    "en_US-amy-medium": "Amy (US, bright)",
-    "en_US-ryan-high": "Ryan (US, male)",
-    "en_US-hfc_female-medium": "HFC Female (US)",
-    "en_GB-alba-medium": "Alba (Scottish English)",
-    "en_GB-northern_english_male-medium": "Northern English (UK, male)",
-}
-
 
 def ensure_voice(voice: str) -> None:
     if (VOICES_DIR / f"{voice}.onnx").exists():

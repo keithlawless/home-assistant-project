@@ -20,6 +20,8 @@ SETTINGS_DEFAULTS: dict[str, Any] = {
     # Filled in from IP geolocation on first start; editable in Settings.
     "location": None,             # {"name", "lat", "lon", "timezone"}
     "rooms": ["Kitchen", "Living Room", "Dining Room", "Family Room", "Bedroom"],
+    "voice": None,                # "engine:voice" from taco.voices; None = config default
+    "wake_sensitivity": "medium", # low | medium | high
 }
 
 

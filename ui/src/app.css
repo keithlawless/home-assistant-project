@@ -45,3 +45,7 @@ input {
   border-radius: 12px;
   padding: 10px 14px;
 }
+
+/* Touch kiosk: scroll by swiping, no scrollbars. */
+* { scrollbar-width: none; }
+*::-webkit-scrollbar { display: none; }

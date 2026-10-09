@@ -20,6 +20,7 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 
 from taco.config import load_config
+from taco.voices import VOICES, is_known
 
 from .assistant import Assistant
 from .db import Database
@@ -145,6 +146,10 @@ async def get_settings() -> dict[str, Any]:
 
 @app.put("/api/settings")
 async def put_settings(changes: dict[str, Any]) -> dict[str, Any]:
+    if "voice" in changes and changes["voice"] is not None and not is_known(changes["voice"]):
+        raise HTTPException(400, f"unknown voice {changes['voice']!r}")
+    if changes.get("wake_sensitivity", "medium") not in ("low", "medium", "high"):
+        raise HTTPException(400, "wake_sensitivity must be low, medium or high")
     try:
         settings = state.db.update_settings(changes)
     except KeyError as e:
@@ -374,6 +379,20 @@ async def commission_matter(body: dict[str, Any]) -> list[dict[str, Any]]:
     out = state.devices.found_payload()
     await state.hub.broadcast({"type": "found", "found": out})
     return out
+
+
+@app.get("/api/voices")
+async def list_voices() -> list[dict[str, str]]:
+    return VOICES
+
+
+@app.post("/api/voice/preview")
+async def preview_voice(body: dict[str, Any]) -> dict[str, bool]:
+    """Have taco-voice say a sample sentence in a voice without switching to it."""
+    if not is_known(body.get("voice", "")):
+        raise HTTPException(400, "unknown voice")
+    await state.hub.broadcast({"type": "voice_command", "command": "preview", "voice": body["voice"]})
+    return {"ok": True}
 
 
 @app.post("/api/voice/event")

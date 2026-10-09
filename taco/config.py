@@ -21,9 +21,13 @@ DEFAULTS: dict = {
         "input_device": None,
         "output_device": None,
         "sample_rate": 16000,
+        # Listen for the wake word while Taco talks. Needs a mic with echo
+        # cancellation (e.g. a USB speakerphone), or Taco hears itself.
+        "barge_in": False,
     },
     "wake": {
-        # Placeholder until the custom hey_taco model is trained.
+        # Built-in name, or a path to a custom model such as
+        # /srv/taco/models/wakeword/hey_taco.onnx (see wakeword/README.md).
         "model": "hey_jarvis",
         "threshold": 0.5,
     },
@@ -40,6 +44,7 @@ DEFAULTS: dict = {
         "compute_type": "int8",
     },
     "tts": {
+        # Starting voice; the Settings screen (or "change your voice") overrides it.
         "engine": "piper",
         "voice": "en_US-lessac-medium",
     },

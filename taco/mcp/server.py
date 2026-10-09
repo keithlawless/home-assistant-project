@@ -234,6 +234,24 @@ def add_matter_device(code: str, already_on_wifi: bool = True) -> list[dict]:
     return [{"key": f["key"], "name": f["name"], "kind": f["kind"]} for f in found]
 
 
+# --- Taco itself ----------------------------------------------------------------
+
+@mcp.tool()
+def list_voices() -> list[dict]:
+    """Voices Taco can speak in, with accent, gender and the current choice.
+    Kokoro voices sound most natural but take a second or two longer to start."""
+    current = _call("GET", "/api/settings").get("voice") or "piper:en_US-lessac-medium"
+    return [{**v, "current": v["id"] == current} for v in _call("GET", "/api/voices")]
+
+
+@mcp.tool()
+def set_voice(voice_id: str) -> str:
+    """Switch Taco's speaking voice (an id from list_voices). The change applies
+    from the next sentence; keep the confirmation short."""
+    _call("PUT", "/api/settings", json={"voice": voice_id})
+    return f"Voice set to {voice_id}."
+
+
 def main() -> None:
     mcp.run()
 

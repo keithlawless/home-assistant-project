@@ -16,12 +16,11 @@ class WakeWord:
         from openwakeword.model import Model
 
         # `model` is a built-in name ("hey_jarvis") or a path to a custom .onnx.
-        if Path(model).suffix == ".onnx":
-            paths = [model]
-        else:
-            openwakeword.utils.download_models(model_names=[model])
-            paths = [model]
-        self._model = Model(wakeword_models=paths, inference_framework="onnx")
+        # Either way the shared feature models must be present; fetching one
+        # built-in model brings them along.
+        custom = Path(model).suffix == ".onnx"
+        openwakeword.utils.download_models(model_names=["hey_jarvis" if custom else model])
+        self._model = Model(wakeword_models=[model], inference_framework="onnx")
         self.threshold = threshold
         self.name = Path(model).stem
         log.info("wake word ready: %s (threshold %.2f)", self.name, threshold)
