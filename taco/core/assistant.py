@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
+from .calendar import say_events
 from .devices.match import resolve
 from .lists import canonical, split_items
 from .intents import Intent, normalize, parse, say_clock, say_duration
@@ -171,8 +172,8 @@ class Assistant:
 
     async def _do_stop(self) -> dict[str, Any]:
         # "Stop" silences a ringing alarm; with nothing ringing it stops the music.
-        if not self.timers.stop_ringing() and self.state.media.playing:
-            await self.state.media.stop()
+        if not self.timers.stop_ringing() and self.state.music_playing:
+            await self.state.stop_music()
         await self.state.hub.broadcast({"type": "voice_command", "command": "stop"})
         return _reply(silent=True)
 
@@ -348,7 +349,11 @@ class Assistant:
             if today["precip"] and today["precip"] >= 30:
                 line += f", and a {today['precip']} percent chance of rain"
             lines.append(line + ".")
-        for alert in getattr(self.state, "alerts", [])[:2]:
+        today_events = self.state.events_on(now.date())
+        if today_events:
+            n = len(today_events)
+            lines.append(f"You have {n} {'event' if n == 1 else 'events'} today: {say_events(today_events)}.")
+        for alert in self.state.alerts[:2]:
             lines.append(f"Weather alert: {alert['event']}.")
         upcoming = [t for t in self.timers.all() if t.kind in ("alarm", "reminder") and t.state == "running"
                     and datetime.fromtimestamp(t.ends_at).date() == now.date()]
@@ -382,11 +387,11 @@ class Assistant:
         return _reply(f"Playing {station['name']}.")
 
     async def _do_media_stop(self) -> dict[str, Any]:
-        await self.state.media.stop()
+        await self.state.stop_music()
         return _reply(silent=True)
 
     async def _do_media_status(self) -> dict[str, Any]:
-        st = self.state.media.status()
+        st = self.state.media_status()
         return _reply(f"This is {st['station']}." if st else "Nothing's playing right now.")
 
     # -- recipe mode -------------------------------------------------------------

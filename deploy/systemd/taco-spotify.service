@@ -1,0 +1,22 @@
+[Unit]
+Description=Taco Spotify Connect speaker (librespot)
+After=pipewire.service network-online.target
+Wants=pipewire.service
+
+[Service]
+# librespot comes from the raspotify package, unpacked into ~/.local/bin by
+# deploy/install-user.sh (no system install needed). Audio goes to the default
+# PipeWire output through pw-play, tagged so taco-core can turn it down while
+# Taco is talking.
+ExecStart=%h/.local/bin/librespot \
+    --name Taco --device-type speaker --bitrate 320 \
+    --initial-volume 70 --enable-volume-normalisation \
+    --cache %h/.cache/librespot \
+    --backend subprocess \
+    --device "pw-play --raw --rate 44100 --channels 2 --format s16 -P {application.name=TacoSpotify} -" \
+    --onevent %h/taco/deploy/spotify-event.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

@@ -15,11 +15,23 @@ if ! cmp -s deploy/wireplumber/51-taco-no-suspend.conf ~/.config/wireplumber/wir
   systemctl --user restart wireplumber
 fi
 
+# Spotify Connect: unpack librespot from the raspotify .deb (no sudo needed).
+if [[ ! -x ~/.local/bin/librespot ]]; then
+  repo=https://dtcooper.github.io/raspotify
+  deb=$(curl -s "$repo/dists/raspotify/main/binary-arm64/Packages" |
+        awk '/^Package: raspotify$/{p=1} p&&/^Filename:/{print $2; exit}')
+  tmp=$(mktemp -d)
+  curl -sSL -o "$tmp/raspotify.deb" "$repo/$deb"
+  dpkg-deb -x "$tmp/raspotify.deb" "$tmp/x"
+  install -m 755 "$tmp/x/usr/bin/librespot" ~/.local/bin/librespot
+  rm -rf "$tmp"
+fi
+
 mkdir -p ~/.config/systemd/user
 cp deploy/systemd/*.service ~/.config/systemd/user/
 systemctl --user daemon-reload
-systemctl --user enable --now taco-core.service taco-voice.service
-systemctl --user restart taco-core.service taco-voice.service hermes-gateway.service
+systemctl --user enable --now taco-core.service taco-voice.service taco-spotify.service
+systemctl --user restart taco-core.service taco-voice.service taco-spotify.service hermes-gateway.service
 
 # Kiosk: boot straight into the Taco UI.
 mkdir -p ~/.config/labwc

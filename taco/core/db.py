@@ -26,6 +26,9 @@ SETTINGS_DEFAULTS: dict[str, Any] = {
     "vacation_mode": False,       # random lamps in the evening while away
     # Screen goes fully dark when idle during these hours (instead of the clock).
     "night_hours": {"enabled": False, "start": "22:30", "end": "06:30"},
+    # Power the panel off in night mode (instead of black). Off until a touch
+    # is confirmed to wake it on this hardware.
+    "night_screen_off": False,
 }
 
 

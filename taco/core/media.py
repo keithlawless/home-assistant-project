@@ -1,6 +1,7 @@
-"""Internet radio through mpv, with station search from Radio Browser
-(radio-browser.info, a free community directory). Music is "ducked" to a
-low volume while Taco is listening or talking."""
+"""Music: internet radio through mpv (stations from Radio Browser, a free
+community directory) and a Spotify Connect speaker (librespot, see
+deploy/systemd/taco-spotify.service). Both are "ducked" to a low volume
+while Taco is listening or talking."""
 
 from __future__ import annotations
 
@@ -98,3 +99,57 @@ class RadioPlayer:
             writer.close()
         except (OSError, asyncio.TimeoutError) as e:
             log.debug("mpv ipc: %s", e)
+
+
+class SpotifyState:
+    """Mirrors librespot's playback events; ducks its PipeWire stream."""
+
+    APP_NAME = "TacoSpotify"   # matches -P {application.name=...} in the service
+
+    def __init__(self):
+        self.playing = False
+        self.track: dict[str, str] = {}
+
+    def update(self, event: dict[str, Any]) -> None:
+        name = event.get("event", "")
+        if event.get("name"):
+            self.track = {"name": event["name"], "artists": event.get("artists", "")}
+        if name in ("playing", "started", "track_changed"):
+            self.playing = True
+        elif name in ("paused", "stopped", "session_disconnected", "end_of_track"):
+            self.playing = False
+
+    def status(self) -> dict[str, Any] | None:
+        if not self.playing or not self.track:
+            return None
+        who = f" · {self.track['artists']}" if self.track.get("artists") else ""
+        return {"station": f"{self.track['name']}{who}", "source": "spotify"}
+
+    async def duck(self, ducked: bool) -> None:
+        node = await self._node_id()
+        if node is not None:
+            proc = await asyncio.create_subprocess_exec(
+                "wpctl", "set-volume", str(node), "0.2" if ducked else "1.0",
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+            await proc.wait()
+
+    async def stop(self) -> None:
+        """librespot has no local pause control; restarting it ends the session."""
+        proc = await asyncio.create_subprocess_exec("systemctl", "--user", "restart", "taco-spotify",
+                                                    stdout=asyncio.subprocess.DEVNULL,
+                                                    stderr=asyncio.subprocess.DEVNULL)
+        await proc.wait()
+        self.playing = False
+
+    async def _node_id(self) -> int | None:
+        proc = await asyncio.create_subprocess_exec("pw-dump", stdout=asyncio.subprocess.PIPE,
+                                                    stderr=asyncio.subprocess.DEVNULL)
+        out, _ = await proc.communicate()
+        try:
+            for obj in json.loads(out or b"[]"):
+                props = (obj.get("info") or {}).get("props") or {}
+                if obj.get("type") == "PipeWire:Interface:Node" and props.get("application.name") == self.APP_NAME:
+                    return obj["id"]
+        except ValueError:
+            pass
+        return None

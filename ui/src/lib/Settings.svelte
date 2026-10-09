@@ -123,6 +123,13 @@
           <button class:on={s.night_hours.enabled} onclick={() => save({ night_hours: { ...s.night_hours, enabled: true } })}>On</button>
         </div>
       </div>
+      <div class="row">
+        <div class="name">Turn the screen off at night<div class="sub">Powers the panel down instead of showing black; touch wakes it</div></div>
+        <div class="seg">
+          <button class:on={!s.night_screen_off} onclick={() => save({ night_screen_off: false })}>Off</button>
+          <button class:on={s.night_screen_off} onclick={() => save({ night_screen_off: true })}>On</button>
+        </div>
+      </div>
       {#if s.night_hours.enabled}
         <div class="row">
           <div class="name">Night starts / ends</div>

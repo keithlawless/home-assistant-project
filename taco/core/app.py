@@ -10,8 +10,9 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,7 @@ from taco.voices import VOICES, is_known
 
 from .alerts import fetch_alerts
 from .assistant import Assistant
+from .calendar import fetch_events
 from .db import Database
 from .devices.base import DeviceError
 from .devices.kasa import KasaDriver
@@ -32,7 +34,7 @@ from .devices.matter import MatterDriver
 from .hub import Hub
 from .intents import normalize, parse_clock
 from .lists import ListStore
-from .media import RadioPlayer, search_stations
+from .media import RadioPlayer, SpotifyState, search_stations
 from .scenes import SceneStore, scene_key
 from .scheduler import Scheduler, ScheduleStore, describe
 from .weather import fetch_forecast, geocode, locate_by_ip
@@ -43,6 +45,7 @@ UI_DIST = Path(__file__).resolve().parents[2] / "ui" / "dist"
 WEATHER_REFRESH_S = 600
 WEATHER_RETRY_S = 60
 ALERTS_REFRESH_S = 300
+CALENDAR_REFRESH_S = 900
 
 
 class State:
@@ -66,8 +69,10 @@ class State:
         self.lists = ListStore(self.db.conn, self.db.lock)
         self.scenes = SceneStore(self.db.conn, self.db.lock)
         self.media = RadioPlayer(self.cfg["audio"]["output_device"], on_change=self.broadcast_media)
+        self.spotify = SpotifyState()
         self.recipe: dict[str, Any] | None = None
         self.alerts: list[dict[str, Any]] = []
+        self.events: list[dict[str, Any]] = []   # calendar, today + 6 days
         self._announced_alerts: set[str] = set()
         self.schedules = ScheduleStore(self.db.conn, self.db.lock)
         self.scheduler = Scheduler(
@@ -81,8 +86,22 @@ class State:
         )
         self.assistant = Assistant(self)
 
+    def media_status(self) -> dict[str, Any] | None:
+        return self.media.status() or self.spotify.status()
+
+    @property
+    def music_playing(self) -> bool:
+        return self.media.playing or self.spotify.playing
+
+    async def stop_music(self) -> None:
+        if self.media.playing:
+            await self.media.stop()
+        if self.spotify.playing:
+            await self.spotify.stop()
+            await self.broadcast_media()
+
     async def broadcast_media(self) -> None:
-        await self.hub.broadcast({"type": "media", "media": self.media.status()})
+        await self.hub.broadcast({"type": "media", "media": self.media_status()})
 
     async def broadcast_recipe(self) -> None:
         await self.hub.broadcast({"type": "recipe", "recipe": self.recipe})
@@ -90,6 +109,8 @@ class State:
     async def play_radio(self, query: str) -> dict[str, Any] | None:
         stations = await search_stations(self.http, query)
         if stations:
+            if self.spotify.playing:
+                await self.spotify.stop()
             await self.media.play(stations[0])
             return stations[0]
         return None
@@ -103,6 +124,18 @@ class State:
     async def announce(self, text: str) -> None:
         """Have taco-voice chime and speak `text` (alerts, scheduled reminders)."""
         await self.hub.broadcast({"type": "announce", "text": text})
+
+    def events_on(self, day) -> list[dict[str, Any]]:
+        return [e for e in self.events if e["date"] == day.isoformat()]
+
+    async def calendar_loop(self) -> None:
+        urls = self.cfg["calendar"]["ical_urls"]
+        if not urls:
+            return
+        while True:
+            self.events = await fetch_events(self.http, urls, datetime.now().date())
+            await self.hub.broadcast({"type": "events", "events": self.events_on(datetime.now().date())})
+            await asyncio.sleep(CALENDAR_REFRESH_S)
 
     async def alerts_loop(self) -> None:
         while True:
@@ -125,9 +158,18 @@ class State:
     async def broadcast_lists(self) -> None:
         await self.hub.broadcast({"type": "lists", "lists": self.lists_payload()})
 
-    async def set_screen(self, mode: str) -> None:
-        """mode: "night" (dark until touched) or "on"."""
-        await self.hub.broadcast({"type": "screen", "mode": mode})
+    async def set_screen(self, mode: str, broadcast: bool = True) -> None:
+        """mode: "night" (dark until touched) or "on". With night_screen_off set,
+        the panel itself is powered down (DPMS via wlopm) rather than shown black."""
+        if broadcast:
+            await self.hub.broadcast({"type": "screen", "mode": mode})
+        if self.db.settings()["night_screen_off"]:
+            env = {**os.environ, "WAYLAND_DISPLAY": "wayland-0",
+                   "XDG_RUNTIME_DIR": os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")}
+            proc = await asyncio.create_subprocess_exec(
+                "wlopm", "--off" if mode == "night" else "--on", "*", env=env,
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+            await proc.wait()
 
     async def run_scene(self, scene: dict[str, Any]) -> str:
         """Carry out a scene's actions; return what Taco should say."""
@@ -162,7 +204,7 @@ class State:
             elif kind == "night":
                 await self.set_screen("night")
             elif kind == "media_stop":
-                await self.media.stop()
+                await self.stop_music()
             elif kind == "scene" and (scene := self.scenes.get(action.get("name", ""))):
                 more, bad = await self.run_actions(scene["actions"])
                 speech += more
@@ -191,7 +233,8 @@ class State:
                 "timers": self.timers_payload(), "devices": self.devices.payload(),
                 "found": self.devices.found_payload(), "lists": self.lists_payload(),
                 "scenes": self.scenes.all(), "schedules": self.schedules_payload(), "alerts": self.alerts,
-                "media": self.media.status(), "recipe": self.recipe}
+                "media": self.media_status(), "recipe": self.recipe,
+                "events": self.events_on(datetime.now().date())}
 
     async def broadcast_timers(self) -> None:
         await self.hub.broadcast({"type": "timers", "timers": self.timers_payload()})
@@ -236,7 +279,7 @@ async def lifespan(app: FastAPI):
     state = State()
     tasks = [asyncio.create_task(c) for c in (
         state.weather_loop(), state.timer_loop(), state.matter.run(), state.devices.poll_loop(),
-        state.scheduler.loop(), state.alerts_loop())]
+        state.scheduler.loop(), state.alerts_loop(), state.calendar_loop())]
     yield
     for task in tasks:
         task.cancel()
@@ -635,6 +678,14 @@ async def delete_schedule(schedule_id: int) -> dict[str, bool]:
     return {"ok": True}
 
 
+@app.get("/api/calendar")
+async def calendar(days: int = 1) -> list[dict[str, Any]]:
+    """Events from today for `days` days (up to 7)."""
+    today = datetime.now().date()
+    last = (today + timedelta(days=max(1, min(days, 7)) - 1)).isoformat()
+    return [e for e in state.events if today.isoformat() <= e["date"] <= last]
+
+
 @app.get("/api/alerts")
 async def get_alerts() -> list[dict[str, Any]]:
     return state.alerts
@@ -653,7 +704,17 @@ async def announce(body: dict[str, Any]) -> dict[str, bool]:
 
 @app.get("/api/media")
 async def media_status() -> dict[str, Any] | None:
-    return state.media.status()
+    return state.media_status()
+
+
+@app.post("/api/media/spotify")
+async def spotify_event(event: dict[str, Any]) -> dict[str, bool]:
+    """Playback events from librespot's --onevent hook (deploy/spotify-event.sh)."""
+    if event.get("event") in ("playing", "started") and state.media.playing:
+        await state.media.stop(notify=False)   # Spotify takes over from the radio
+    state.spotify.update(event)
+    await state.broadcast_media()
+    return {"ok": True}
 
 
 @app.post("/api/media/play")
@@ -672,7 +733,7 @@ async def play_media(body: dict[str, Any]) -> dict[str, Any]:
 
 @app.post("/api/media/stop")
 async def stop_media() -> dict[str, bool]:
-    await state.media.stop()
+    await state.stop_music()
     return {"ok": True}
 
 
@@ -724,8 +785,9 @@ async def close_recipe() -> dict[str, bool]:
 
 @app.post("/api/screen")
 async def screen(body: dict[str, Any]) -> dict[str, bool]:
-    """body: {"mode": "night" | "on"}"""
-    await state.set_screen(str(body.get("mode", "on")))
+    """body: {"mode": "night" | "on", "from_ui": bool}. The UI reports its own
+    night/wake changes with from_ui so they aren't echoed back to it."""
+    await state.set_screen(str(body.get("mode", "on")), broadcast=not body.get("from_ui"))
     return {"ok": True}
 
 
@@ -735,7 +797,10 @@ async def voice_event(event: dict[str, Any]) -> dict[str, bool]:
     if event.get("type") == "state":
         state.voice = {"state": event.get("state", "idle")}
         # Turn music down while Taco is listening or talking.
-        await state.media.duck(state.voice["state"] != "idle")
+        ducked = state.voice["state"] != "idle"
+        await state.media.duck(ducked)
+        if state.spotify.playing:
+            await state.spotify.duck(ducked)
     await state.hub.broadcast({"type": "voice", "event": event})
     return {"ok": True}
 

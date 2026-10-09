@@ -68,6 +68,10 @@ DEFAULTS: dict = {
         "username": None,
         "password": None,
     },
+    "calendar": {
+        # Private iCal addresses (secret; keep them in /srv/taco/config.toml only).
+        "ical_urls": [],
+    },
     "matter": {
         "url": "ws://127.0.0.1:5580/ws",
         # Needed only to set up brand-new Matter devices over Bluetooth.

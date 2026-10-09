@@ -27,7 +27,24 @@
     lastActivity = Date.now();
   }
 
-  // "Good night" and other scenes can put the screen in night mode.
+  // Tell core when the UI itself goes dark or wakes, so it can power the
+  // panel down/up (night_screen_off).
+  function reportScreen(mode) {
+    fetch('/api/screen', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode, from_ui: true }),
+    }).catch(() => {});
+  }
+
+  function setNight(on) {
+    if (night === on) return;
+    night = on;
+    reportScreen(on ? 'night' : 'on');
+  }
+
+  // "Good night" and other scenes can put the screen in night mode
+  // (core has already powered the panel down, so no report back).
   $effect(() => {
     if ($screenMode === 'night') {
       night = true;
@@ -52,7 +69,7 @@
   }
 
   function wakeFromNight() {
-    night = false;
+    setNight(false);
     activity();
   }
 
@@ -61,7 +78,7 @@
     if ($timers.some((t) => t.state === 'ringing')) {
       activity();
       saverOn = false;
-      night = false;
+      setNight(false);
     }
   });
 
@@ -71,7 +88,7 @@
     if (e && !(e.type === 'state' && e.state === 'idle')) {
       activity();
       saverOn = false;
-      night = false;
+      setNight(false);
     }
   });
 
@@ -90,7 +107,7 @@
       if ($recipe) return;   // keep the recipe on screen while cooking
       if (!saverOn && !night && Date.now() - lastActivity > minutes * 60_000) {
         if (inNightHours($settings?.night_hours)) {
-          night = true;   // fully dark overnight instead of the clock screensaver
+          setNight(true);   // fully dark overnight instead of the clock screensaver
           closeSheets();
           return;
         }

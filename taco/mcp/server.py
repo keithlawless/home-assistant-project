@@ -428,6 +428,15 @@ def current_recipe() -> dict | None:
     return _call("GET", "/api/recipe")
 
 
+# --- calendar ------------------------------------------------------------------
+
+@mcp.tool()
+def get_calendar(days: int = 1) -> list[dict]:
+    """The household calendar from today for `days` days (1 = today, up to 7).
+    Read-only; times are local. Empty if no calendar is connected."""
+    return _call("GET", "/api/calendar", params={"days": days})
+
+
 # --- Taco itself ----------------------------------------------------------------
 
 @mcp.tool()
