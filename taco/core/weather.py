@@ -69,10 +69,19 @@ async def locate_by_ip(http: httpx.AsyncClient) -> dict[str, Any] | None:
 
 async def geocode(http: httpx.AsyncClient, query: str) -> list[dict[str, Any]]:
     """Search places by name or postal code, for the Settings screen."""
-    r = await http.get(GEOCODE_URL, params={"name": query, "count": 5, "language": "en"})
+    name, _, region = query.partition(",")
+    r = await http.get(GEOCODE_URL, params={"name": name.strip(), "count": 10, "language": "en"})
     r.raise_for_status()
+    results = r.json().get("results", [])
+    region = region.strip().lower()
+    # Prefer matches in the named state/country, then towns over peaks and rivers.
+    results.sort(key=lambda p: (
+        bool(region) and region not in f"{p.get('admin1', '')} {p.get('country', '')}".lower(),
+        not str(p.get("feature_code", "")).startswith("PPL"),
+        -(p.get("population") or 0),
+    ))
     out = []
-    for p in r.json().get("results", []):
+    for p in results[:5]:
         region = p.get("admin1") or p.get("country", "")
         out.append({"name": f"{p['name']}, {region}".strip(", "), "lat": p["latitude"],
                     "lon": p["longitude"], "timezone": p.get("timezone", "auto")})

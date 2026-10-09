@@ -74,6 +74,9 @@ class BargeIn:
     def __enter__(self) -> BargeIn:
         if self.loop.cfg["audio"]["barge_in"]:
             self.loop.mic.flush()
+            # The model's rolling window still holds the "Hey Taco" that started
+            # this turn; without a reset it re-fires instantly.
+            self.loop.wake.reset()
             self._thread = threading.Thread(target=self._watch, daemon=True, name="barge-in")
             self._thread.start()
         return self
@@ -89,6 +92,7 @@ class BargeIn:
                 self.heard = True
                 self.loop.cancel.set()
                 self.loop.speaker.stop()
+                self.loop.hermes.abort()
                 return
 
     def __exit__(self, *exc) -> None:
@@ -173,6 +177,7 @@ class VoiceLoop:
                 log.info("stop requested")
                 self.cancel.set()
                 self.speaker.stop()
+                self.hermes.abort()
             elif msg.get("command") == "preview" and msg.get("voice"):
                 threading.Thread(target=self._preview, args=(msg["voice"],), daemon=True).start()
 
@@ -187,6 +192,7 @@ class VoiceLoop:
             frame = self.mic.read()
             if (score := self.wake.detect(frame)) is not None:
                 log.info("wake word (%.2f)", score)
+                self.wake.reset()
                 if self.alarm.active:
                     # Like a smart speaker: saying the name silences the alarm.
                     self.alarm.silence()
@@ -275,10 +281,11 @@ class VoiceLoop:
                     self.speaker.play(audio, rate)
                     spoken.append(sentence)
                     self.events.send("reply", text=" ".join(spoken))
-            except httpx.HTTPError as e:
-                log.error("hermes request failed: %s", e)
-                self.speaker.play(*self.synthesize(ERROR_REPLY))
-                spoken = [ERROR_REPLY]
+            except (httpx.HTTPError, httpx.StreamError) as e:
+                if not self.cancel.is_set():  # an abort also lands here
+                    log.error("hermes request failed: %s", e)
+                    self.speaker.play(*self.synthesize(ERROR_REPLY))
+                    spoken = [ERROR_REPLY]
             self.speaker.wait()
         self.mic.flush()  # discard Taco's own voice picked up by the mic
         log.info("reply done in %.2fs: %r", time.monotonic() - t0, " ".join(spoken))

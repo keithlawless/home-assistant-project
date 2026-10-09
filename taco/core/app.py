@@ -139,6 +139,18 @@ async def get_weather() -> dict[str, Any]:
     return state.weather
 
 
+@app.get("/api/weather/place")
+async def weather_for_place(q: str) -> dict[str, Any]:
+    """Forecast for somewhere other than home ("Sunday River, Maine")."""
+    try:
+        places = await geocode(state.http, q)
+        if not places:
+            raise HTTPException(404, f"couldn't find a place called {q!r}")
+        return await fetch_forecast(state.http, places[0], state.db.settings()["units"])
+    except httpx.HTTPError as e:
+        raise HTTPException(502, f"weather lookup failed: {e}") from None
+
+
 @app.get("/api/settings")
 async def get_settings() -> dict[str, Any]:
     return state.db.settings()

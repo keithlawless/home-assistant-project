@@ -62,6 +62,7 @@ class HermesClient:
         self._http = httpx.Client(headers=headers, timeout=httpx.Timeout(timeout_s, connect=5.0))
         self._history: list[dict] = []
         self._last_turn = 0.0
+        self._response: httpx.Response | None = None
 
     def _messages(self, text: str) -> list[dict]:
         if time.monotonic() - self._last_turn > self.history_ttl_s:
@@ -75,6 +76,7 @@ class HermesClient:
         full_reply, buffer, event = [], "", None
 
         with self._http.stream("POST", f"{self.url}/chat/completions", json=payload) as resp:
+            self._response = resp
             resp.raise_for_status()
             for line in resp.iter_lines():
                 if not line:
@@ -104,10 +106,21 @@ class HermesClient:
                         if spoken := clean_for_speech(s):
                             yield spoken
 
+        self._response = None
         if tail := clean_for_speech(buffer):
             yield tail
         self._history = [*messages, {"role": "assistant", "content": "".join(full_reply).strip()}]
         self._last_turn = time.monotonic()
+
+    def abort(self) -> None:
+        """Cancel the in-flight reply from another thread (stop button, barge-in).
+        Closing the stream makes ask() raise instead of waiting for Hermes to
+        finish a slow tool call."""
+        if (resp := self._response) is not None:
+            try:
+                resp.close()
+            except Exception:
+                pass
 
     def reset(self) -> None:
         self._history = []

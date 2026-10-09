@@ -125,19 +125,30 @@ def set_reminder(message: str, in_minutes: float | None = None, at_epoch_seconds
 
 # --- weather -------------------------------------------------------------------
 
+def _weather(place: str | None) -> dict[str, Any]:
+    if place:
+        return _call("GET", "/api/weather/place", params={"q": place})
+    return _call("GET", "/api/weather")
+
+
 @mcp.tool()
-def get_weather() -> dict:
-    """Current conditions and today's forecast at the house. Prefer this over a
-    web search for local weather."""
-    w = _call("GET", "/api/weather")
+def get_weather(place: str | None = None) -> dict:
+    """Current conditions and today's forecast, at the house by default or
+    anywhere else. Always use this rather than a web search for weather. For
+    `place`, give a town and state or country ("Bethel, Maine"); for a ski area,
+    park or landmark, use the nearest town."""
+    w = _weather(place)
     return {"location": w["location"], "units": w["units"], "current": w["current"], "today": w["today"],
             "next_hours": w["hourly"][:12]}
 
 
 @mcp.tool()
-def get_forecast() -> dict:
-    """Daily forecast for the next several days at the house (highs, lows, rain chance)."""
-    w = _call("GET", "/api/weather")
+def get_forecast(place: str | None = None) -> dict:
+    """Daily forecast for the next six days (highs, lows, rain chance), at the
+    house by default or anywhere else. Always use this rather than a web search
+    for weather. For `place`, give a town and state or country; for a ski area,
+    park or landmark, use the nearest town."""
+    w = _weather(place)
     return {"location": w["location"], "units": w["units"], "days": w["daily"]}
 
 
