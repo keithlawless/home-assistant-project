@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import time
 from datetime import datetime
@@ -18,8 +19,14 @@ import httpx
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 
+from taco.config import load_config
+
 from .assistant import Assistant
 from .db import Database
+from .devices.base import DeviceError
+from .devices.kasa import KasaDriver
+from .devices.manager import DeviceManager, Registry
+from .devices.matter import MatterDriver
 from .hub import Hub
 from .intents import normalize, parse_clock
 from .weather import fetch_forecast, geocode, locate_by_ip
@@ -33,20 +40,39 @@ WEATHER_RETRY_S = 60
 
 class State:
     def __init__(self):
+        self.cfg = load_config()
         self.db = Database()
         self.hub = Hub()
         self.http = httpx.AsyncClient(timeout=10.0)
         self.weather: dict[str, Any] | None = None
         self.voice: dict[str, Any] = {"state": "idle"}
         self.refresh_now = asyncio.Event()
+        kasa = self.cfg["kasa"]
+        self.matter = MatterDriver(self.cfg["matter"]["url"], on_change=self.on_devices_changed)
+        self.devices = DeviceManager(
+            Registry(self.db.conn, self.db.lock),
+            {"kasa": KasaDriver(kasa["username"], kasa["password"]), "matter": self.matter},
+            rooms=lambda: self.db.settings()["rooms"],
+            on_change=self.on_devices_changed,
+        )
+        self._last_devices = ""
         self.assistant = Assistant(self)
+
+    async def on_devices_changed(self) -> None:
+        """Push device state to screens, but only when something changed."""
+        payload = self.devices.payload()
+        encoded = json.dumps(payload, sort_keys=True)
+        if encoded != self._last_devices:
+            self._last_devices = encoded
+            await self.hub.broadcast({"type": "devices", "devices": payload})
 
     def timers_payload(self) -> list[dict[str, Any]]:
         return [t.to_dict() for t in self.db.timers.all()]
 
     def snapshot(self) -> dict[str, Any]:
         return {"weather": self.weather, "settings": self.db.settings(), "voice": self.voice,
-                "timers": self.timers_payload()}
+                "timers": self.timers_payload(), "devices": self.devices.payload(),
+                "found": self.devices.found_payload()}
 
     async def broadcast_timers(self) -> None:
         await self.hub.broadcast({"type": "timers", "timers": self.timers_payload()})
@@ -89,7 +115,8 @@ state: State
 async def lifespan(app: FastAPI):
     global state
     state = State()
-    tasks = [asyncio.create_task(state.weather_loop()), asyncio.create_task(state.timer_loop())]
+    tasks = [asyncio.create_task(c) for c in (
+        state.weather_loop(), state.timer_loop(), state.matter.run(), state.devices.poll_loop())]
     yield
     for task in tasks:
         task.cancel()
@@ -227,6 +254,126 @@ async def stop(body: dict[str, Any] | None = None) -> dict[str, Any]:
         await state.hub.broadcast({"type": "voice_command", "command": "stop"})
     await state.broadcast_timers()
     return {"stopped": [t.id for t in stopped]}
+
+
+# --- devices -------------------------------------------------------------------
+
+def _device_or_404(device_id: int) -> dict[str, Any]:
+    if (d := state.devices.registry.get(device_id)) is None:
+        raise HTTPException(404, f"no device {device_id}")
+    return d
+
+
+@app.get("/api/devices")
+async def list_devices() -> list[dict[str, Any]]:
+    return state.devices.payload()
+
+
+@app.post("/api/devices/scan")
+async def scan_devices() -> list[dict[str, Any]]:
+    """Look on the network; returns devices not yet added."""
+    found = await state.devices.scan()
+    await state.hub.broadcast({"type": "found", "found": found})
+    return found
+
+
+@app.get("/api/devices/found")
+async def found_devices() -> list[dict[str, Any]]:
+    return state.devices.found_payload()
+
+
+@app.post("/api/devices")
+async def add_device(body: dict[str, Any]) -> dict[str, Any]:
+    """body: {"key" from scan results, optional "name", optional "room"}."""
+    room = body.get("room")
+    try:
+        device = state.devices.add(body["key"], body.get("name"), room)
+    except KeyError as e:
+        raise HTTPException(400, str(e)) from None
+    if room:
+        _remember_room(room)
+    await state.devices.refresh()
+    await state.hub.broadcast({"type": "found", "found": state.devices.found_payload()})
+    return device
+
+
+def _remember_room(room: str) -> None:
+    rooms = state.db.settings()["rooms"]
+    if room.lower() not in (r.lower() for r in rooms):
+        state.db.update_settings({"rooms": [*rooms, room]})
+
+
+@app.patch("/api/devices/{device_id}")
+async def update_device(device_id: int, body: dict[str, Any]) -> dict[str, Any]:
+    """Rename, move to a room, or set nicknames (aliases)."""
+    _device_or_404(device_id)
+    changes = {k: v for k, v in body.items() if k in ("name", "room", "aliases")}
+    if not changes:
+        raise HTTPException(400, "nothing to change (name, room, aliases)")
+    if changes.get("room"):
+        _remember_room(changes["room"])
+    device = state.devices.registry.update(device_id, **changes)
+    await state.on_devices_changed()
+    return device  # type: ignore[return-value]
+
+
+@app.delete("/api/devices/{device_id}")
+async def remove_device(device_id: int) -> dict[str, bool]:
+    d = _device_or_404(device_id)
+    state.devices.registry.remove(device_id)
+    state.devices.states.pop(device_id, None)
+    if d["protocol"] == "matter" and not _node_still_used(d):
+        with contextlib.suppress(DeviceError):
+            await state.matter.remove(d["address"])
+    await state.on_devices_changed()
+    return {"ok": True}
+
+
+def _node_still_used(device: dict[str, Any]) -> bool:
+    """Another endpoint of this Matter node is still registered, so keep the node."""
+    node = device["address"].split("-")[0]
+    return any(o["protocol"] == "matter" and o["address"].split("-")[0] == node
+                   for o in state.devices.registry.all())
+
+
+@app.post("/api/devices/control")
+async def control_devices(body: dict[str, Any]) -> dict[str, Any]:
+    """body: {"ids": [...]} or {"target": "living room"}, plus "on" (bool) or "level" (0-100)."""
+    if "ids" in body:
+        ids = [int(i) for i in body["ids"]]
+    else:
+        m = state.devices.resolve(str(body.get("target", "")))
+        if m is None:
+            raise HTTPException(404, f"no device or room matches {body.get('target')!r}")
+        if m.ambiguous:
+            names = [d["name"] for d in state.devices.registry.all() if d["id"] in m.ids]
+            raise HTTPException(409, f"ambiguous; matches {', '.join(names)}")
+        ids = m.ids
+    if "level" in body:
+        ok, failed = await state.devices.control(ids, "level", int(body["level"]))
+    elif "on" in body:
+        ok, failed = await state.devices.control(ids, "power", bool(body["on"]))
+    else:
+        raise HTTPException(400, "give 'on' or 'level'")
+    return {"ok": [d["name"] for d in ok], "not_responding": [d["name"] for d in failed]}
+
+
+@app.post("/api/matter/commission")
+async def commission_matter(body: dict[str, Any]) -> list[dict[str, Any]]:
+    """body: {"code": setup or pairing code, "network_only": bool}.
+    network_only=true for a device already on Wi-Fi and shared from another app;
+    false for a brand-new device in pairing mode (Bluetooth + Wi-Fi credentials
+    from [matter] in /srv/taco/config.toml)."""
+    m = state.cfg["matter"]
+    try:
+        found = await state.matter.commission(str(body["code"]), bool(body.get("network_only", True)),
+                                              m.get("wifi_ssid"), m.get("wifi_password"))
+    except (KeyError, DeviceError) as e:
+        raise HTTPException(400, f"commissioning failed: {e}") from None
+    state.devices.add_found(found)
+    out = state.devices.found_payload()
+    await state.hub.broadcast({"type": "found", "found": out})
+    return out
 
 
 @app.post("/api/voice/event")

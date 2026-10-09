@@ -16,7 +16,11 @@ from mcp.server.mcpserver import MCPServer
 
 CORE = os.environ.get("TACO_CORE_URL", "http://127.0.0.1:8700")
 
-mcp = MCPServer("taco", instructions="Tools for the household's kitchen assistant: timers, alarms, reminders and local weather.")
+mcp = MCPServer(
+    "taco",
+    instructions="Tools for the household's kitchen assistant: timers, alarms, reminders, "
+                 "local weather, and the home's smart plugs and lights.",
+)
 http = httpx.Client(base_url=CORE, timeout=10.0)
 
 
@@ -135,6 +139,99 @@ def get_forecast() -> dict:
     """Daily forecast for the next several days at the house (highs, lows, rain chance)."""
     w = _call("GET", "/api/weather")
     return {"location": w["location"], "units": w["units"], "days": w["daily"]}
+
+
+# --- devices -------------------------------------------------------------------
+
+def _device(d: dict[str, Any]) -> dict[str, Any]:
+    st = d["state"]
+    out = {"id": d["id"], "name": d["name"], "room": d["room"], "kind": d["kind"],
+           "online": st["online"], "on": st["on"]}
+    if "level" in d["capabilities"]:
+        out["level"] = st["level"]
+    if d["aliases"]:
+        out["nicknames"] = d["aliases"]
+    return out
+
+
+@mcp.tool()
+def list_devices() -> list[dict]:
+    """All registered smart plugs, lights and switches with their room and current state."""
+    return [_device(d) for d in _call("GET", "/api/devices")]
+
+
+@mcp.tool()
+def control_devices(on: bool | None = None, level: int | None = None, target: str | None = None,
+                    device_ids: list[int] | None = None) -> dict:
+    """Turn devices on/off (on=true/false) or set brightness (level 0-100).
+    Pick devices by device_ids (from list_devices) or by a spoken target such as
+    a device name, a room ("living room") or "everything"."""
+    body: dict[str, Any] = {"ids": device_ids} if device_ids else {"target": target or ""}
+    if level is not None:
+        body["level"] = level
+    elif on is not None:
+        body["on"] = on
+    else:
+        raise ValueError("give on or level")
+    return _call("POST", "/api/devices/control", json=body)
+
+
+@mcp.tool()
+def find_new_devices() -> list[dict]:
+    """Scan the network for Kasa plugs and commissioned Matter devices that aren't
+    added yet. Then tell the user what was found and ask whether to keep each
+    device's own name and suggested room, before calling add_device."""
+    return [{"key": f["key"], "name": f["name"], "kind": f["kind"], "model": f["model"],
+             "suggested_room": f["suggested_room"]} for f in _call("POST", "/api/devices/scan")]
+
+
+@mcp.tool()
+def add_device(key: str, name: str | None = None, room: str | None = None) -> dict:
+    """Add a device from find_new_devices. Name and room default to the device's
+    own name and the room guessed from it."""
+    d = _call("POST", "/api/devices", json={"key": key, "name": name, "room": room})
+    return {"id": d["id"], "name": d["name"], "room": d["room"]}
+
+
+@mcp.tool()
+def update_device(device_id: int, name: str | None = None, room: str | None = None,
+                  nicknames: list[str] | None = None) -> dict:
+    """Rename a device, move it to a room, or set nicknames it should answer to
+    (e.g. ["reading lamp"]). Nicknames replace the existing list."""
+    body: dict[str, Any] = {}
+    if name:
+        body["name"] = name
+    if room:
+        body["room"] = room
+    if nicknames is not None:
+        body["aliases"] = nicknames
+    d = _call("PATCH", f"/api/devices/{device_id}", json=body)
+    return {"id": d["id"], "name": d["name"], "room": d["room"], "nicknames": d["aliases"]}
+
+
+@mcp.tool()
+def remove_device(device_id: int) -> str:
+    """Remove a device from Taco. Confirm with the user first."""
+    _call("DELETE", f"/api/devices/{device_id}")
+    return "Removed."
+
+
+@mcp.tool()
+def list_rooms() -> list[str]:
+    """Rooms devices can be assigned to. A new room is created by assigning a device to it."""
+    return _call("GET", "/api/settings")["rooms"]
+
+
+@mcp.tool()
+def add_matter_device(code: str, already_on_wifi: bool = True) -> list[dict]:
+    """Commission a Matter-over-Wi-Fi device with its 11-digit setup code or QR
+    payload ("MT:..."). Use already_on_wifi=true for a device already set up in
+    another app (Apple Home, Google Home, Alexa) that gave a pairing code; false
+    for a brand-new device in pairing mode (set up over Bluetooth, takes up to a
+    couple of minutes). Afterwards the device appears in find_new_devices."""
+    found = _call("POST", "/api/matter/commission", json={"code": code, "network_only": already_on_wifi},
+                  timeout=330)
+    return [{"key": f["key"], "name": f["name"], "kind": f["kind"]} for f in found]
 
 
 def main() -> None:

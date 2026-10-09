@@ -5,6 +5,8 @@ export const weather = writable(null);
 export const settings = writable(null);
 export const connected = writable(false);
 export const timers = writable([]);
+export const devices = writable([]);
+export const found = writable([]);
 // Each voice event from taco-voice: {type: 'state'|'heard'|'tool'|'reply', ...}
 export const voiceEvents = writable(null);
 
@@ -14,6 +16,14 @@ function handle(msg) {
       weather.set(msg.weather);
       settings.set(msg.settings);
       timers.set(msg.timers ?? []);
+      devices.set(msg.devices ?? []);
+      found.set(msg.found ?? []);
+      break;
+    case 'devices':
+      devices.set(msg.devices);
+      break;
+    case 'found':
+      found.set(msg.found);
       break;
     case 'timers':
       timers.set(msg.timers);
@@ -64,3 +74,19 @@ export function stopAll() {
 export function cancelTimer(id) {
   return fetch(`/api/timers/${id}`, { method: 'DELETE' });
 }
+
+async function post(url, body, method = 'POST') {
+  const r = await fetch(url, {
+    method,
+    headers: { 'Content-Type': 'application/json' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
+  return r.json();
+}
+
+export const setPower = (id, on) => post('/api/devices/control', { ids: [id], on });
+export const setLevel = (id, level) => post('/api/devices/control', { ids: [id], level });
+export const setRoomPower = (ids, on) => post('/api/devices/control', { ids, on });
+export const scanDevices = () => post('/api/devices/scan');
+export const addDevice = (key, name, room) => post('/api/devices', { key, name, room });

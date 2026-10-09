@@ -4,6 +4,7 @@
   import { onMount } from 'svelte';
   import Home from './lib/Home.svelte';
   import Settings from './lib/Settings.svelte';
+  import Devices from './lib/Devices.svelte';
   import Screensaver from './lib/Screensaver.svelte';
   import VoiceOverlay from './lib/VoiceOverlay.svelte';
   import Ringing from './lib/Ringing.svelte';
@@ -13,6 +14,7 @@
   const SHIFT_PX = 4;
 
   let showSettings = $state(false);
+  let showDevices = $state(false);
   let saverOn = $state(false);
   let lastActivity = Date.now();
   let shift = $state({ x: 0, y: 0 });
@@ -43,12 +45,16 @@
       document.body.classList.add('no-cursor');
     }
     connect();
+    // Deep links for testing and remote screens: /#devices, /#settings
+    showDevices = location.hash === '#devices';
+    showSettings = location.hash === '#settings';
 
     const idleCheck = setInterval(() => {
       const minutes = $settings?.screensaver_minutes ?? 5;
       if (!saverOn && Date.now() - lastActivity > minutes * 60_000) {
         saverOn = true;
         showSettings = false;
+        showDevices = false;
       }
     }, 5_000);
 
@@ -67,7 +73,10 @@
 <svelte:window onpointerdown={activity} onkeydown={activity} />
 
 <div class="shell" style="transform: translate({shift.x}px, {shift.y}px)">
-  <Home onSettings={() => (showSettings = true)} />
+  <Home onSettings={() => (showSettings = true)} onDevices={() => (showDevices = true)} />
+  {#if showDevices}
+    <Devices onClose={() => (showDevices = false)} />
+  {/if}
   {#if showSettings}
     <Settings onClose={() => (showSettings = false)} />
   {/if}

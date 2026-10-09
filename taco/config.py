@@ -53,6 +53,17 @@ DEFAULTS: dict = {
     "core": {
         "url": "http://127.0.0.1:8700",
     },
+    "kasa": {
+        # Only newer Kasa firmware needs TP-Link account credentials.
+        "username": None,
+        "password": None,
+    },
+    "matter": {
+        "url": "ws://127.0.0.1:5580/ws",
+        # Needed only to set up brand-new Matter devices over Bluetooth.
+        "wifi_ssid": None,
+        "wifi_password": None,
+    },
 }
 
 

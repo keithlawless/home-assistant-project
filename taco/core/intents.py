@@ -311,4 +311,38 @@ def parse(raw: str, now: datetime | None = None) -> Intent | None:
             return Intent("volume", {"step": 0.1})
         if re.search(r"\b(down|quieter|softer|lower|decrease)\b", text):
             return Intent("volume", {"step": -0.1})
+
+    return _device_intent(text)
+
+
+# Pronouns need conversation context, which only Hermes has.
+_PRONOUNS = {"it", "that", "this", "them", "those", "these", "everything else"}
+
+
+def _device_intent(text: str) -> Intent | None:
+    """Turn devices on/off, set a level, or ask whether one is on."""
+    text = re.sub(r"^(please |can you |could you |would you )+", "", text).removesuffix(" please")
+    if text in ("lights out", "lights off", "all off"):
+        return Intent("power", {"on": False, "target": "everything"})
+    if text in ("lights on", "all on"):
+        return Intent("power", {"on": True, "target": "everything"})
+
+    # Ask before act: "is the lamp on" must not match "<target> on".
+    if m := re.fullmatch(r"(?:is|are) (?:the )?(?P<t>.+?) (?:on|off|still on)", text):
+        if m.group("t") not in _PRONOUNS:
+            return Intent("device_status", {"target": m.group("t")})
+    m = (re.fullmatch(r"(?:turn|switch|shut|power) (?P<onoff>on|off) (?P<t>.+)", text)
+         or re.fullmatch(r"(?:turn|switch|shut|power) (?P<t>.+?) (?P<onoff>on|off)", text)
+         or re.fullmatch(r"(?P<t>.+?) (?P<onoff>on|off)", text))
+    if m and m.group("t") not in _PRONOUNS and len(m.group("t").split()) <= 6:
+        return Intent("power", {"on": m.group("onoff") == "on", "target": m.group("t")})
+
+    if m := re.fullmatch(r"(?:set|dim|turn|bring|put) (?:the )?(?P<t>.+?) (?:to|at|down to|up to) "
+                         r"(?P<n>\d{1,3})(?:\s*%| percent)?", text):
+        if m.group("t") not in _PRONOUNS:
+            return Intent("level", {"target": m.group("t"), "level": min(100, int(m.group("n")))})
+    if m := re.fullmatch(r"(?P<dir>dim|brighten) (?:the )?(?P<t>.+)", text):
+        if m.group("t") not in _PRONOUNS:
+            return Intent("level", {"target": m.group("t"), "level": 30 if m.group("dir") == "dim" else 100})
+
     return None

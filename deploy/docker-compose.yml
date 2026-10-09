@@ -1,0 +1,17 @@
+# Matter controller for Taco: the Open Home Foundation's matter.js server
+# (successor to python-matter-server, same WebSocket API on :5580).
+services:
+  matter:
+    image: ghcr.io/matter-js/matterjs-server:stable
+    container_name: taco-matter
+    restart: unless-stopped
+    network_mode: host          # Matter needs mDNS and IPv6 on the LAN
+    volumes:
+      - /srv/taco/matter:/data
+      - /run/dbus:/run/dbus:ro  # BLE commissioning through the host's BlueZ
+    environment:
+      NOBLE_BINDINGS: dbus
+      BLUETOOTH_ADAPTER: "0"    # hci0; setting an adapter enables BLE
+      PRIMARY_INTERFACE: wlan0
+      # The WebSocket API and dashboard have no auth; only taco-core uses them.
+      LISTEN_ADDRESS: 127.0.0.1

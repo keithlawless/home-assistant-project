@@ -10,7 +10,7 @@ cp SOUL.md ~/.hermes/SOUL.md
 
 # Taco's tools, served over MCP from taco-core.
 hermes config set mcp_servers.taco.command "$HOME/taco/.venv/bin/taco-mcp" >/dev/null
-hermes config set mcp_servers.taco.timeout 30 >/dev/null
+hermes config set mcp_servers.taco.timeout 330 >/dev/null  # Matter setup can take minutes
 
 # The voice endpoint gets only what a kitchen assistant needs: web search,
 # memory of household preferences, skills, and Taco's tools. No terminal,

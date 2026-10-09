@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Show the Taco UI full-screen, restarting Chromium if it ever exits.
 URL="http://localhost:8700/"
+echo $$ > "${XDG_RUNTIME_DIR:-/tmp}/taco-kiosk.pid"
 
 until curl -sf "$URL" >/dev/null; do sleep 1; done
 
@@ -13,6 +14,7 @@ while true; do
     --disable-pinch --overscroll-history-navigation=0 \
     --password-store=basic \
     --autoplay-policy=no-user-gesture-required \
+    --remote-debugging-port=9222 \
     "$URL"
   sleep 2
 done

@@ -6,7 +6,7 @@
   import { weather, settings } from './store.js';
   import { now, formatTime, ampm, formatDate, hourLabel, dayLabel } from './time.js';
 
-  let { onSettings } = $props();
+  let { onSettings, onDevices } = $props();
 
   let h24 = $derived($settings?.clock_24h ?? false);
   let w = $derived($weather);
@@ -28,7 +28,7 @@
         </div>
         <div class="details muted">
           Humidity {w.current.humidity}% · Wind {w.current.wind} {w.units.wind}
-          {#if w.today.precip}· Rain {w.today.precip}%{/if}
+          {#if w.today.precip >= 20}· Rain {w.today.precip}%{/if}
         </div>
       {:else}
         <div class="loading">Loading weather…</div>
@@ -39,6 +39,13 @@
       <div class="time">{formatTime($now, h24)}<span class="ampm">{ampm($now, h24)}</span></div>
       <div class="date">{formatDate($now)}</div>
       {#if w}<div class="place">{w.location}</div>{/if}
+      <button class="devices-btn" onclick={onDevices} aria-label="Devices">
+        <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round">
+          <path d="M3 10.5 12 3l9 7.5V20a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z" />
+        </svg>
+        Devices
+      </button>
       <button class="gear" onclick={onSettings} aria-label="Settings">
         <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="2">
           <circle cx="12" cy="12" r="3" />
@@ -101,6 +108,11 @@
   .gear {
     position: absolute; right: -8px; bottom: 0;
     background: transparent; color: var(--muted); padding: 10px;
+  }
+  .devices-btn {
+    position: absolute; right: 52px; bottom: 4px;
+    display: flex; align-items: center; gap: 8px;
+    background: var(--panel); color: var(--text); font-size: 17px; padding: 8px 16px;
   }
 
   .strip {

@@ -19,6 +19,7 @@ SETTINGS_DEFAULTS: dict[str, Any] = {
     "clock_24h": False,
     # Filled in from IP geolocation on first start; editable in Settings.
     "location": None,             # {"name", "lat", "lon", "timezone"}
+    "rooms": ["Kitchen", "Living Room", "Dining Room", "Family Room", "Bedroom"],
 }
 
 
@@ -26,29 +27,30 @@ class Database:
     def __init__(self, path: Path | None = None):
         path = path or TACO_HOME / "data" / "taco.db"
         path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(path, check_same_thread=False)
-        self._lock = threading.Lock()
-        with self._lock:
-            self._conn.execute(
+        # One connection and lock, shared with the timer and device tables.
+        self.conn = sqlite3.connect(path, check_same_thread=False)
+        self.lock = threading.Lock()
+        with self.lock:
+            self.conn.execute(
                 "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
             )
-            self._conn.commit()
-        self.timers = TimerStore(self._conn, self._lock)
+            self.conn.commit()
+        self.timers = TimerStore(self.conn, self.lock)
 
     def settings(self) -> dict[str, Any]:
-        with self._lock:
-            rows = self._conn.execute("SELECT key, value FROM settings").fetchall()
+        with self.lock:
+            rows = self.conn.execute("SELECT key, value FROM settings").fetchall()
         return {**SETTINGS_DEFAULTS, **{k: json.loads(v) for k, v in rows}}
 
     def update_settings(self, changes: dict[str, Any]) -> dict[str, Any]:
         unknown = set(changes) - set(SETTINGS_DEFAULTS)
         if unknown:
             raise KeyError(f"unknown settings: {', '.join(sorted(unknown))}")
-        with self._lock:
-            self._conn.executemany(
+        with self.lock:
+            self.conn.executemany(
                 "INSERT INTO settings (key, value) VALUES (?, ?) "
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 [(k, json.dumps(v)) for k, v in changes.items()],
             )
-            self._conn.commit()
+            self.conn.commit()
         return self.settings()

@@ -10,6 +10,7 @@ dependencies = [
   "uvicorn[standard]>=0.30",
   "websockets>=13",
   "mcp>=2.0",
+  "python-kasa>=0.10",
   "webrtcvad-wheels>=2.0.14",
   "openwakeword>=0.6.0",
   "onnxruntime>=1.19",

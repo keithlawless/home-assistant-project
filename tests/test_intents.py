@@ -105,7 +105,7 @@ def test_time_date_weather_volume():
     "What goes well with tomatoes?",
     "Who won the World Series last year?",
     "How many cups are in a quart?",
-    "Turn on the kitchen light",        # devices: Phase 4
+    "Turn that on",                     # pronouns need Hermes's context
     "Tell me a joke",
 ])
 def test_defers_to_hermes(text):
@@ -118,3 +118,23 @@ def test_say_helpers():
     assert say_duration(3725) == "1 hour and 2 minutes"
     assert say_clock(datetime(2026, 10, 10, 7, 30), NOW) == "7:30 AM tomorrow"
     assert say_clock(datetime(2026, 10, 9, 14, 0), NOW) == "2 PM"
+
+
+@pytest.mark.parametrize("text,on,target", [
+    ("Turn on the kitchen light.", True, "the kitchen light"),
+    ("Turn the living room off", False, "the living room"),
+    ("Switch off bedroom lamp one", False, "bedroom lamp 1"),
+    ("Living room lamps on", True, "living room lamps"),
+    ("Please turn off all the lights", False, "all the lights"),
+    ("Lights out", False, "everything"),
+])
+def test_power(text, on, target):
+    i = p(text)
+    assert i.name == "power" and i.slots == {"on": on, "target": target}
+
+
+def test_level_and_status():
+    assert p("Set the living room lamp to 40%").slots == {"target": "living room lamp", "level": 40}
+    assert p("Dim the kitchen lights").slots == {"target": "kitchen lights", "level": 30}
+    assert p("Is the bedroom lamp on?").slots == {"target": "bedroom lamp"}
+    assert p("Set the volume to 6").name == "volume"   # volume wins over device level
