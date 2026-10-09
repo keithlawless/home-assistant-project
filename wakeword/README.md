@@ -1,7 +1,9 @@
 # Training the "Hey Taco" wake word
 
-Taco uses [openWakeWord](https://github.com/dscripka/openWakeWord). Until a
-custom model exists, it listens for the built-in **"Hey Jarvis"**.
+Taco uses [openWakeWord](https://github.com/dscripka/openWakeWord) with the
+custom model in this folder, **`hey_taco.onnx`**. It was trained locally on a
+Mac (see `training/README.md`) because the Colab notebook below broke on
+Colab's Python 3.13. The Colab route is kept here for reference.
 
 Training needs a GPU and a large set of background audio, so it runs in
 Google Colab (free) rather than on the Pi. It takes under an hour, mostly

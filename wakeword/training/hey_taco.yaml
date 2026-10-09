@@ -1,0 +1,47 @@
+model_name: hey_taco
+target_phrase:
+- hey taco
+custom_negative_phrases:
+- taco
+- tacos
+- taco tuesday
+- taco bell
+- hey tango
+- hey tucker
+- hey tacky
+- hey jacko
+- hey talk
+- today though
+- hey toto
+- okay taco
+- hey taylor
+- hey there
+n_samples: 30000
+n_samples_val: 3000
+tts_batch_size: 50
+augmentation_batch_size: 16
+piper_sample_generator_path: ./piper-sample-generator
+output_dir: ./my_custom_model
+rir_paths:
+- ./mit_rirs
+background_paths:
+- ./audioset_16k
+- ./fma
+background_paths_duplication_rate:
+- 1
+- 1
+false_positive_validation_data_path: ./validation_set_features.npy
+augmentation_rounds: 1
+feature_data_files:
+  ACAV100M_sample: ./openwakeword_features_ACAV100M_2000_hrs_16bit.npy
+batch_n_per_class:
+  ACAV100M_sample: 1024
+  adversarial_negative: 50
+  positive: 50
+model_type: dnn
+layer_size: 32
+steps: 50000
+max_negative_weight: 1500
+target_false_positives_per_hour: 0.2
+target_accuracy: 0.7
+target_recall: 0.5
