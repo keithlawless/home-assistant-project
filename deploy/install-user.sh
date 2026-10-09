@@ -6,9 +6,7 @@ export PATH="$HOME/.local/bin:$PATH"
 
 uv sync --python 3.12 -q
 
-# Taco persona for Hermes (back up the original once).
-[[ -f ~/.hermes/SOUL.md.orig ]] || cp ~/.hermes/SOUL.md ~/.hermes/SOUL.md.orig
-cp hermes/SOUL.md ~/.hermes/SOUL.md
+hermes/configure.sh
 
 # Keep the HDMI audio output from suspending (see the conf file).
 mkdir -p ~/.config/wireplumber/wireplumber.conf.d

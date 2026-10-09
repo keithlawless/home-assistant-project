@@ -90,7 +90,9 @@ class Speaker:
         self._idle.wait()
 
     def stop(self) -> None:
-        """Cut playback short (touch "stop", or future barge-in)."""
+        """Cut playback short and drop anything queued (touch "stop", alarms)."""
+        if self._idle.is_set():
+            return  # nothing playing; a stale flag would swallow the next clip
         self._stopping.set()
         if self._proc and self._proc.poll() is None:
             self._proc.terminate()

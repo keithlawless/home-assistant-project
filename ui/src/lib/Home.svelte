@@ -2,6 +2,7 @@
   // Default screen: current weather, clock, next hours and the coming days.
   // Laid out for the 1024x600 Kogoda panel.
   import WeatherIcon from './WeatherIcon.svelte';
+  import TimerChips from './TimerChips.svelte';
   import { weather, settings } from './store.js';
   import { now, formatTime, ampm, formatDate, hourLabel, dayLabel } from './time.js';
 
@@ -17,7 +18,7 @@
     <div class="current">
       {#if w}
         <div class="now">
-          <WeatherIcon icon={w.current.icon} size={150} />
+          <WeatherIcon icon={w.current.icon} size={130} />
           <div class="temp">{w.current.temp}<span class="deg">{deg}</span></div>
         </div>
         <div class="condition">{w.current.condition}</div>
@@ -46,6 +47,8 @@
       </button>
     </div>
   </section>
+
+  <TimerChips />
 
   {#if w}
     <section class="strip hourly">
@@ -77,7 +80,7 @@
     height: 100%;
     padding: 20px 24px;
     display: grid;
-    grid-template-rows: 1fr auto auto;
+    grid-template-rows: 1fr auto auto auto;
     gap: 12px;
   }
   .top { display: flex; justify-content: space-between; }

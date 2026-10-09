@@ -1,7 +1,7 @@
 <script>
   // Shows what Taco heard and is saying. Follows taco-voice's events and
   // lingers after the reply so it can be read; tap to dismiss.
-  import { voiceEvents } from './store.js';
+  import { voiceEvents, stopAll } from './store.js';
 
   const LINGER_MS = 10_000;
   const TOOL_LABELS = {
@@ -51,6 +51,8 @@
 
   function dismiss() {
     clearTimeout(hideTimer);
+    // Tapping while Taco is still talking also cuts the answer short.
+    if (phase !== 'done') stopAll();
     phase = 'idle';
   }
 </script>

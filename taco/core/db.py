@@ -11,6 +11,8 @@ from typing import Any
 
 from taco.config import TACO_HOME
 
+from .timers import TimerStore
+
 SETTINGS_DEFAULTS: dict[str, Any] = {
     "screensaver_minutes": 5,
     "units": "fahrenheit",        # or "celsius"
@@ -31,6 +33,7 @@ class Database:
                 "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
             )
             self._conn.commit()
+        self.timers = TimerStore(self._conn, self._lock)
 
     def settings(self) -> dict[str, Any]:
         with self._lock:

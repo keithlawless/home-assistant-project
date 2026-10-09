@@ -9,6 +9,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -16,8 +18,10 @@ import httpx
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 
+from .assistant import Assistant
 from .db import Database
 from .hub import Hub
+from .intents import normalize, parse_clock
 from .weather import fetch_forecast, geocode, locate_by_ip
 
 log = logging.getLogger("taco.core")
@@ -35,9 +39,23 @@ class State:
         self.weather: dict[str, Any] | None = None
         self.voice: dict[str, Any] = {"state": "idle"}
         self.refresh_now = asyncio.Event()
+        self.assistant = Assistant(self)
+
+    def timers_payload(self) -> list[dict[str, Any]]:
+        return [t.to_dict() for t in self.db.timers.all()]
 
     def snapshot(self) -> dict[str, Any]:
-        return {"weather": self.weather, "settings": self.db.settings(), "voice": self.voice}
+        return {"weather": self.weather, "settings": self.db.settings(), "voice": self.voice,
+                "timers": self.timers_payload()}
+
+    async def broadcast_timers(self) -> None:
+        await self.hub.broadcast({"type": "timers", "timers": self.timers_payload()})
+
+    async def timer_loop(self) -> None:
+        while True:
+            if self.db.timers.tick():
+                await self.broadcast_timers()
+            await asyncio.sleep(0.25)
 
     async def ensure_location(self) -> None:
         if self.db.settings()["location"] is None:
@@ -71,9 +89,10 @@ state: State
 async def lifespan(app: FastAPI):
     global state
     state = State()
-    task = asyncio.create_task(state.weather_loop())
+    tasks = [asyncio.create_task(state.weather_loop()), asyncio.create_task(state.timer_loop())]
     yield
-    task.cancel()
+    for task in tasks:
+        task.cancel()
     await state.http.aclose()
 
 
@@ -115,6 +134,99 @@ async def search_places(q: str) -> list[dict[str, Any]]:
         return await geocode(state.http, q)
     except httpx.HTTPError as e:
         raise HTTPException(502, f"place search failed: {e}") from None
+
+
+@app.post("/api/intent")
+async def intent(body: dict[str, Any]) -> dict[str, Any]:
+    """Fast path for taco-voice: handle common requests without the LLM."""
+    return await state.assistant.handle(body.get("text", ""))
+
+
+# --- timers, alarms, reminders (used by the UI and by taco-mcp for Hermes) ---
+
+def _timer_or_404(timer_id: int):
+    if (t := state.db.timers.get(timer_id)) is None:
+        raise HTTPException(404, f"no timer {timer_id}")
+    return t
+
+
+@app.get("/api/timers")
+async def list_timers() -> list[dict[str, Any]]:
+    return state.timers_payload()
+
+
+@app.post("/api/timers")
+async def create_timer(body: dict[str, Any]) -> dict[str, Any]:
+    try:
+        t = state.db.timers.add_timer(float(body["seconds"]), body.get("label"))
+    except (KeyError, ValueError) as e:
+        raise HTTPException(400, f"bad timer: {e}") from None
+    await state.broadcast_timers()
+    return t.to_dict()
+
+
+@app.post("/api/alarms")
+async def create_alarm(body: dict[str, Any]) -> dict[str, Any]:
+    """body: {"at": epoch seconds} or {"time": "7:30 am"} plus optional label."""
+    if "at" in body:
+        at = float(body["at"])
+    elif (when := parse_clock(normalize(str(body.get("time", ""))), datetime.now())) is not None:
+        at = when.timestamp()
+    else:
+        raise HTTPException(400, "give 'at' (epoch seconds) or a 'time' like '7:30 am'")
+    t = state.db.timers.add_alarm(at, body.get("label"))
+    await state.broadcast_timers()
+    return t.to_dict()
+
+
+@app.post("/api/reminders")
+async def create_reminder(body: dict[str, Any]) -> dict[str, Any]:
+    """body: {"message", and "in_seconds" or "at" (epoch seconds)}."""
+    if not body.get("message"):
+        raise HTTPException(400, "reminder needs a message")
+    at = float(body["at"]) if "at" in body else time.time() + float(body.get("in_seconds", 0))
+    t = state.db.timers.add_reminder(at, body["message"])
+    await state.broadcast_timers()
+    return t.to_dict()
+
+
+@app.post("/api/timers/{timer_id}/add")
+async def add_time(timer_id: int, body: dict[str, Any]) -> dict[str, Any]:
+    t = state.db.timers.add_time(_timer_or_404(timer_id), float(body.get("seconds", 60)))
+    await state.broadcast_timers()
+    return t.to_dict()
+
+
+@app.post("/api/timers/{timer_id}/{action}")
+async def timer_action(timer_id: int, action: str) -> dict[str, Any]:
+    t = _timer_or_404(timer_id)
+    if action == "pause":
+        t = state.db.timers.pause(t)
+    elif action == "resume":
+        t = state.db.timers.resume(t)
+    else:
+        raise HTTPException(404, f"unknown action {action}")
+    await state.broadcast_timers()
+    return t.to_dict()
+
+
+@app.delete("/api/timers/{timer_id}")
+async def delete_timer(timer_id: int) -> dict[str, bool]:
+    state.db.timers.remove([_timer_or_404(timer_id).id])
+    await state.broadcast_timers()
+    return {"ok": True}
+
+
+@app.post("/api/stop")
+async def stop(body: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Stop button / touch: silence ringing timers and cut off Taco's speech.
+    taco-voice sends {"speech": false} when the wake word interrupts an alarm,
+    so the conversation that follows isn't cut off too."""
+    stopped = state.db.timers.stop_ringing()
+    if (body or {}).get("speech", True):
+        await state.hub.broadcast({"type": "voice_command", "command": "stop"})
+    await state.broadcast_timers()
+    return {"stopped": [t.id for t in stopped]}
 
 
 @app.post("/api/voice/event")

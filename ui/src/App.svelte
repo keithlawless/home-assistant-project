@@ -6,7 +6,8 @@
   import Settings from './lib/Settings.svelte';
   import Screensaver from './lib/Screensaver.svelte';
   import VoiceOverlay from './lib/VoiceOverlay.svelte';
-  import { connect, connected, settings, voiceEvents } from './lib/store.js';
+  import Ringing from './lib/Ringing.svelte';
+  import { connect, connected, settings, timers, voiceEvents } from './lib/store.js';
 
   const SHIFT_EVERY_MS = 3 * 60_000;
   const SHIFT_PX = 4;
@@ -19,6 +20,14 @@
   function activity() {
     lastActivity = Date.now();
   }
+
+  // A ringing timer wakes the screen.
+  $effect(() => {
+    if ($timers.some((t) => t.state === 'ringing')) {
+      activity();
+      saverOn = false;
+    }
+  });
 
   // Voice activity counts as use: wake the screen when Taco hears its name.
   $effect(() => {
@@ -71,6 +80,7 @@
 {#if saverOn}
   <Screensaver onWake={() => { activity(); saverOn = false; }} />
 {/if}
+<Ringing />
 
 <style>
   .shell {

@@ -4,6 +4,7 @@ import { writable } from 'svelte/store';
 export const weather = writable(null);
 export const settings = writable(null);
 export const connected = writable(false);
+export const timers = writable([]);
 // Each voice event from taco-voice: {type: 'state'|'heard'|'tool'|'reply', ...}
 export const voiceEvents = writable(null);
 
@@ -12,6 +13,10 @@ function handle(msg) {
     case 'snapshot':
       weather.set(msg.weather);
       settings.set(msg.settings);
+      timers.set(msg.timers ?? []);
+      break;
+    case 'timers':
+      timers.set(msg.timers);
       break;
     case 'weather':
       weather.set(msg.weather);
@@ -49,4 +54,13 @@ export async function saveSettings(changes) {
 export async function searchPlaces(q) {
   const r = await fetch(`/api/geocode?q=${encodeURIComponent(q)}`);
   return r.ok ? r.json() : [];
+}
+
+// Silence ringing timers and cut off Taco mid-sentence.
+export function stopAll() {
+  return fetch('/api/stop', { method: 'POST' });
+}
+
+export function cancelTimer(id) {
+  return fetch(`/api/timers/${id}`, { method: 'DELETE' });
 }
