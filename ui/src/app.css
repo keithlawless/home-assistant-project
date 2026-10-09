@@ -1,0 +1,47 @@
+:root {
+  --bg: #0b1220;
+  --panel: #131c2e;
+  --panel-2: #1a2540;
+  --text: #e8eef7;
+  --muted: #8a9bb8;
+  --accent: #f5a524;
+  --accent-soft: rgba(245, 165, 36, 0.15);
+  --radius: 18px;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Inter Variable', 'DejaVu Sans', sans-serif;
+  overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: manipulation;
+}
+
+/* Kiosk: hide the pointer unless ?cursor is in the URL (handy with the trackball). */
+body.no-cursor, body.no-cursor * { cursor: none !important; }
+
+button {
+  font: inherit;
+  color: inherit;
+  background: var(--panel-2);
+  border: 0;
+  border-radius: 12px;
+  padding: 10px 16px;
+}
+button:active { filter: brightness(1.3); }
+
+input {
+  font: inherit;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid #2a3a5c;
+  border-radius: 12px;
+  padding: 10px 14px;
+}

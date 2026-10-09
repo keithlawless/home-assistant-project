@@ -1,0 +1,4 @@
+# Taco kiosk session. This replaces the Pi desktop (panel and file manager).
+# To get the normal desktop back: rm ~/.config/labwc/autostart and reboot.
+/usr/bin/kanshi &
+$HOME/taco/deploy/labwc/kiosk.sh &

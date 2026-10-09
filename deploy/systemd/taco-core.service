@@ -1,0 +1,13 @@
+[Unit]
+Description=Taco core (API, UI server, weather, state hub)
+After=network-online.target
+
+[Service]
+WorkingDirectory=%h/taco
+ExecStart=%h/taco/.venv/bin/taco-core
+Restart=always
+RestartSec=3
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,15 @@
+[Unit]
+Description=Taco voice loop (wake word, STT, Hermes, TTS)
+After=pipewire.service hermes-gateway.service
+Wants=pipewire.service
+
+[Service]
+WorkingDirectory=%h/taco
+ExecStart=%h/taco/.venv/bin/taco-voice
+Restart=always
+RestartSec=3
+Environment=PYTHONUNBUFFERED=1
+Environment=HF_HUB_DISABLE_TELEMETRY=1
+
+[Install]
+WantedBy=default.target
