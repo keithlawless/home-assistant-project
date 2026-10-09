@@ -25,6 +25,22 @@ unattended.
 5. Download the resulting **`hey_taco.onnx`** (the notebook also makes a
    `.tflite`; Taco needs the `.onnx`).
 
+### If a cell fails with `No module named 'piper_phonemize'`
+
+Colab's newer Python has no build of `piper-phonemize`. Add a code cell just
+above the failing one and run it:
+
+```python
+import sys; print(sys.version)
+!pip install piper-phonemize-cross
+```
+
+then re-run from the failing cell (**Runtime → Run cell and below**). The
+replacement package has builds up to Python 3.12; if the version printed is
+3.13 or newer, pick an older **Runtime version** under **Runtime → Change
+runtime type** and start over with this cell added. The fix lasts only for
+that Colab session. (Background: openWakeWord issue #277.)
+
 ## 2. Install it on Taco
 
 From the Mac, in this repo:
