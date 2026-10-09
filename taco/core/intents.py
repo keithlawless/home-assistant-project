@@ -44,9 +44,11 @@ def words_to_digits(text: str) -> str:
     return " ".join(out)
 
 
-def normalize(text: str) -> str:
+def normalize(text: str, keep_commas: bool = False) -> str:
     text = text.lower().replace("-", " ")
-    text = re.sub(r"[^\w\s:.%]", " ", text)       # keep 7:30, 1.5, 50%
+    keep = r"[^\w\s:.%,]" if keep_commas else r"[^\w\s:.%]"
+    text = re.sub(keep, " ", text)                 # keep 7:30, 1.5, 50% (and list commas)
+    text = re.sub(r"\s+,", ",", text)
     text = re.sub(r"(?<!\d)\.|\.(?!\d)", " ", text)  # drop sentence periods
     text = re.sub(r"\b(\d+)(am|pm)\b", r"\1 \2", text)
     text = re.sub(r"\b([ap])\s?\.?\s?m\b", r"\1m", text)
@@ -312,7 +314,46 @@ def parse(raw: str, now: datetime | None = None) -> Intent | None:
         if re.search(r"\b(down|quieter|softer|lower|decrease)\b", text):
             return Intent("volume", {"step": -0.1})
 
-    return _device_intent(text)
+    # Lists keep commas so "milk, eggs and bread" splits into three items.
+    return (_list_intent(normalize(raw, keep_commas=True).rstrip(",")) or _household_intent(text)
+            or _device_intent(text))
+
+
+_LIST = r"(?:the |my |our )?(?P<list>[a-z ]*?)\s*list"
+
+
+def _list_intent(text: str) -> Intent | None:
+    """Shopping / to-do lists."""
+    text = re.sub(r"^(please |can you |could you )+", "", text).removesuffix(" please")
+    if m := re.fullmatch(rf"(?:add|put) (?P<items>.+?) (?:to|on) {_LIST}", text):
+        return Intent("list_add", {"list": m.group("list") or None, "items": m.group("items")})
+    if m := re.fullmatch(rf"(?:remove|take|delete|cross|check) (?P<items>.+?) (?:from|off|off of) {_LIST}", text):
+        return Intent("list_remove", {"list": m.group("list") or None, "items": m.group("items")})
+    if m := re.fullmatch(rf"(?:clear|empty|erase|delete) {_LIST}", text):
+        return Intent("list_clear", {"list": m.group("list") or None})
+    if m := re.fullmatch(rf"(?:what s|what is|whats|read|read me|tell me what s|what do i have) (?:on )?{_LIST}"
+                         rf"(?: say)?", text):
+        return Intent("list_read", {"list": m.group("list") or None})
+    if re.fullmatch(r"what do (?:i|we) need (?:from|at) the (?:store|grocery store|supermarket)", text):
+        return Intent("list_read", {"list": "shopping"})
+    return None
+
+
+def _household_intent(text: str) -> Intent | None:
+    """Scenes, the morning briefing, and muting the microphone."""
+    if re.fullmatch(r"(?:stop listening|mute(?: the)? (?:microphone|mic)|turn off(?: the)? (?:microphone|mic)"
+                    r"|privacy mode|don t listen)", text):
+        return Intent("mic_mute")
+    if re.fullmatch(r"(?:what s|whats|give me) (?:my |the )?(?:briefing|morning briefing|daily briefing|day look like"
+                    r"|rundown)|(?:what s|whats) (?:going on )?today|brief me", text):
+        return Intent("briefing")
+    if m := re.fullmatch(r"(?:save|remember|store) (?:this|these|the lights|this setting|these settings|the current"
+                         r"(?: lights| setting| settings)?) as (?P<name>[a-z0-9 ]{2,40}?)(?: scene| mode)?", text):
+        return Intent("scene_save", {"name": m.group("name")})
+    if m := re.fullmatch(r"(?:run|activate|start|set|turn on|switch to|begin) (?:the )?(?P<name>[a-z0-9 ]{2,40}?)"
+                         r"(?: scene| mode| routine)", text):
+        return Intent("scene", {"name": m.group("name")})
+    return None
 
 
 # Pronouns need conversation context, which only Hermes has.

@@ -22,6 +22,7 @@ SETTINGS_DEFAULTS: dict[str, Any] = {
     "rooms": ["Kitchen", "Living Room", "Dining Room", "Family Room", "Bedroom"],
     "voice": None,                # "engine:voice" from taco.voices; None = config default
     "wake_sensitivity": "medium", # low | medium | high
+    "mic_muted": False,           # "stop listening": wake word ignored until unmuted
 }
 
 

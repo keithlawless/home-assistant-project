@@ -30,6 +30,8 @@ from .devices.manager import DeviceManager, Registry
 from .devices.matter import MatterDriver
 from .hub import Hub
 from .intents import normalize, parse_clock
+from .lists import ListStore
+from .scenes import SceneStore, scene_key
 from .weather import fetch_forecast, geocode, locate_by_ip
 
 log = logging.getLogger("taco.core")
@@ -57,7 +59,51 @@ class State:
             on_change=self.on_devices_changed,
         )
         self._last_devices = ""
+        self.lists = ListStore(self.db.conn, self.db.lock)
+        self.scenes = SceneStore(self.db.conn, self.db.lock)
+        self.media = None   # radio player, added with music support
         self.assistant = Assistant(self)
+
+    def lists_payload(self) -> dict[str, list[dict[str, Any]]]:
+        return {name: self.lists.items(name) for name in self.lists.names()}
+
+    async def broadcast_lists(self) -> None:
+        await self.hub.broadcast({"type": "lists", "lists": self.lists_payload()})
+
+    async def set_screen(self, mode: str) -> None:
+        """mode: "night" (dark until touched) or "on"."""
+        await self.hub.broadcast({"type": "screen", "mode": mode})
+
+    async def run_scene(self, scene: dict[str, Any]) -> str:
+        """Carry out a scene's actions; return what Taco should say."""
+        speech, failed = [], []
+        for action in scene["actions"]:
+            kind = action.get("type")
+            if kind == "devices":
+                if "ids" in action:
+                    ids = action["ids"]
+                else:
+                    m = self.devices.resolve(action.get("target", "everything"))
+                    ids = m.ids if m else []
+                if "level" in action:
+                    _, bad = await self.devices.control(ids, "level", int(action["level"]))
+                else:
+                    _, bad = await self.devices.control(ids, "power", bool(action.get("on", True)))
+                failed += [d["name"] for d in bad]
+            elif kind == "briefing":
+                speech.append(self.assistant.briefing())
+            elif kind == "night":
+                await self.set_screen("night")
+            elif kind == "media_stop" and self.media:
+                await self.media.stop()
+        key = scene_key(scene["name"])
+        if not speech:
+            speech.append({"good night": "Good night!",
+                           "i m leaving": "Goodbye! I've turned everything off."}.get(key, "Done."))
+        if failed:
+            speech.append(f"{', '.join(failed)} didn't respond.")
+        return " ".join(speech)
+
 
     async def on_devices_changed(self) -> None:
         """Push device state to screens, but only when something changed."""
@@ -73,7 +119,8 @@ class State:
     def snapshot(self) -> dict[str, Any]:
         return {"weather": self.weather, "settings": self.db.settings(), "voice": self.voice,
                 "timers": self.timers_payload(), "devices": self.devices.payload(),
-                "found": self.devices.found_payload()}
+                "found": self.devices.found_payload(), "lists": self.lists_payload(),
+                "scenes": self.scenes.all()}
 
     async def broadcast_timers(self) -> None:
         await self.hub.broadcast({"type": "timers", "timers": self.timers_payload()})
@@ -407,6 +454,83 @@ async def preview_voice(body: dict[str, Any]) -> dict[str, bool]:
     return {"ok": True}
 
 
+# --- lists -------------------------------------------------------------------
+
+@app.get("/api/lists")
+async def get_lists() -> dict[str, list[dict[str, Any]]]:
+    return state.lists_payload()
+
+
+@app.post("/api/lists/{name}")
+async def add_list_items(name: str, body: dict[str, Any]) -> dict[str, Any]:
+    """body: {"items": ["milk", "eggs"]}"""
+    added = state.lists.add(name, [str(i) for i in body.get("items", [])])
+    await state.broadcast_lists()
+    return {"added": added}
+
+
+@app.patch("/api/lists/items/{item_id}")
+async def update_list_item(item_id: int, body: dict[str, Any]) -> dict[str, bool]:
+    state.lists.set_done(item_id, bool(body.get("done", True)))
+    await state.broadcast_lists()
+    return {"ok": True}
+
+
+@app.delete("/api/lists/items/{item_id}")
+async def delete_list_item(item_id: int) -> dict[str, bool]:
+    state.lists.delete(item_id)
+    await state.broadcast_lists()
+    return {"ok": True}
+
+
+@app.delete("/api/lists/{name}")
+async def clear_list(name: str, done_only: bool = False) -> dict[str, int]:
+    removed = state.lists.clear(name, only_done=done_only)
+    await state.broadcast_lists()
+    return {"removed": removed}
+
+
+# --- scenes ------------------------------------------------------------------
+
+@app.get("/api/scenes")
+async def list_scenes() -> list[dict[str, Any]]:
+    return state.scenes.all()
+
+
+@app.put("/api/scenes/{name}")
+async def save_scene(name: str, body: dict[str, Any]) -> dict[str, Any]:
+    """body: {"actions": [...]} (see taco/core/scenes.py for action shapes)."""
+    actions = body.get("actions")
+    if not isinstance(actions, list) or not actions:
+        raise HTTPException(400, "a scene needs a non-empty list of actions")
+    scene = state.scenes.save(name, actions)
+    await state.hub.broadcast({"type": "scenes", "scenes": state.scenes.all()})
+    return scene
+
+
+@app.delete("/api/scenes/{name}")
+async def delete_scene(name: str) -> dict[str, bool]:
+    if not state.scenes.delete(name):
+        raise HTTPException(404, f"no scene {name!r}")
+    await state.hub.broadcast({"type": "scenes", "scenes": state.scenes.all()})
+    return {"ok": True}
+
+
+@app.post("/api/scenes/{name}/run")
+async def run_scene(name: str) -> dict[str, str]:
+    scene = state.scenes.get(name)
+    if scene is None:
+        raise HTTPException(404, f"no scene {name!r}")
+    return {"speech": await state.run_scene(scene)}
+
+
+@app.post("/api/screen")
+async def screen(body: dict[str, Any]) -> dict[str, bool]:
+    """body: {"mode": "night" | "on"}"""
+    await state.set_screen(str(body.get("mode", "on")))
+    return {"ok": True}
+
+
 @app.post("/api/voice/event")
 async def voice_event(event: dict[str, Any]) -> dict[str, bool]:
     """State updates from taco-voice: listening, heard text, tool use, reply."""
@@ -435,7 +559,8 @@ def main() -> None:
     import uvicorn
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
-    uvicorn.run(app, host="0.0.0.0", port=8700, log_level="warning")
+    core = load_config()["core"]
+    uvicorn.run(app, host=core["host"], port=core["port"], log_level="warning")
 
 
 if __name__ == "__main__":

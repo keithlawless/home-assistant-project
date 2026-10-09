@@ -138,3 +138,23 @@ def test_level_and_status():
     assert p("Dim the kitchen lights").slots == {"target": "kitchen lights", "level": 30}
     assert p("Is the bedroom lamp on?").slots == {"target": "bedroom lamp"}
     assert p("Set the volume to 6").name == "volume"   # volume wins over device level
+
+
+def test_lists():
+    i = p("Add milk, eggs and bread to the shopping list")
+    assert i.name == "list_add" and i.slots == {"list": "shopping", "items": "milk, eggs and bread"}
+    assert p("Put paper towels on my list").slots == {"list": None, "items": "paper towels"}
+    assert p("Add call the plumber to my to do list").slots["list"] == "to do"
+    assert p("Remove eggs from the shopping list").name == "list_remove"
+    assert p("What's on the shopping list?").slots == {"list": "shopping"}
+    assert p("What's on my list?").slots == {"list": None}
+    assert p("Clear the grocery list").slots == {"list": "grocery"}
+    assert p("What do we need from the store?").name == "list_read"
+
+
+def test_household():
+    assert p("Stop listening").name == "mic_mute"
+    assert p("What's my briefing?").name == "briefing"
+    assert p("Save this as movie time").slots == {"name": "movie time"}
+    assert p("Activate movie time mode").slots == {"name": "movie time"}
+    assert p("Turn on the living room") .name == "power"   # not a scene

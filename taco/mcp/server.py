@@ -245,6 +245,83 @@ def add_matter_device(code: str, already_on_wifi: bool = True) -> list[dict]:
     return [{"key": f["key"], "name": f["name"], "kind": f["kind"]} for f in found]
 
 
+# --- lists ---------------------------------------------------------------------
+
+@mcp.tool()
+def add_to_list(items: list[str], list_name: str = "shopping") -> dict:
+    """Add items to a list ("shopping", "to do", or any other name). Use one
+    entry per item, e.g. ["milk", "2 lemons"]."""
+    return _call("POST", f"/api/lists/{list_name}", json={"items": items})
+
+
+@mcp.tool()
+def read_lists() -> dict:
+    """All lists and their items (done items are marked)."""
+    return {name: [i["text"] + (" (done)" if i["done"] else "") for i in items]
+            for name, items in _call("GET", "/api/lists").items()}
+
+
+@mcp.tool()
+def remove_from_list(items: list[str], list_name: str = "shopping") -> str:
+    """Remove items from a list by name."""
+    lists = _call("GET", "/api/lists")
+    removed = []
+    for want in items:
+        for i in lists.get(list_name.lower(), []):
+            if want.lower() in i["text"].lower() or i["text"].lower() in want.lower():
+                _call("DELETE", f"/api/lists/items/{i['id']}")
+                removed.append(i["text"])
+                break
+    return f"Removed: {', '.join(removed)}" if removed else "Nothing matched."
+
+
+@mcp.tool()
+def clear_list(list_name: str = "shopping") -> str:
+    """Empty a list. Confirm with the user first."""
+    return f"Removed {_call('DELETE', f'/api/lists/{list_name}')['removed']} items."
+
+
+# --- scenes and routines ---------------------------------------------------------
+
+@mcp.tool()
+def list_scenes() -> list[dict]:
+    """Saved scenes (e.g. "good night", "movie time") and what each does."""
+    return _call("GET", "/api/scenes")
+
+
+@mcp.tool()
+def run_scene(name: str) -> str:
+    """Run a saved scene by name. Returns what to tell the user."""
+    return _call("POST", f"/api/scenes/{name}/run")["speech"]
+
+
+@mcp.tool()
+def save_scene(name: str, actions: list[dict]) -> dict:
+    """Create or replace a scene. Each action is one of:
+    {"type": "devices", "target": "<device, room or everything>", "on": true/false}
+    {"type": "devices", "ids": [device ids], "on": true, "level": 0-100}
+    {"type": "briefing"}   (speak the daily briefing)
+    {"type": "night"}      (dim the screen for the night)
+    {"type": "media_stop"} (stop music)
+    Use list_devices for ids and names. The user can also say "save this as
+    <name>" to capture the current lights."""
+    return _call("PUT", f"/api/scenes/{name}", json={"actions": actions})
+
+
+@mcp.tool()
+def delete_scene(name: str) -> str:
+    """Delete a saved scene. Confirm with the user first."""
+    _call("DELETE", f"/api/scenes/{name}")
+    return "Deleted."
+
+
+@mcp.tool()
+def daily_briefing() -> str:
+    """Today's briefing as Taco would say it: time, weather, alerts, alarms,
+    reminders and the shopping list count. Read it as is or summarize it."""
+    return _call("POST", "/api/intent", json={"text": "what's my briefing"})["speech"]
+
+
 # --- Taco itself ----------------------------------------------------------------
 
 @mcp.tool()

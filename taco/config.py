@@ -57,6 +57,11 @@ DEFAULTS: dict = {
     },
     "core": {
         "url": "http://127.0.0.1:8700",
+        # The API has no login, so by default only the Pi itself can reach it
+        # (the kiosk, the voice loop and Hermes all run there). Set "0.0.0.0"
+        # to open it to the LAN.
+        "host": "127.0.0.1",
+        "port": 8700,
     },
     "kasa": {
         # Only newer Kasa firmware needs TP-Link account credentials.

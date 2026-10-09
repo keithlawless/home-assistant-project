@@ -123,6 +123,7 @@ class VoiceLoop:
         )
         self.events = Events(cfg["core"]["url"])
         self.cancel = threading.Event()   # stop button or barge-in
+        self.muted = False                 # "stop listening" privacy mode
         self.alarm = AlarmPlayer(Speaker(audio["output_device"]), self.synthesize)
         self.core = CoreLink(cfg["core"]["url"], self._on_core_message)
 
@@ -151,6 +152,10 @@ class VoiceLoop:
         log.info("voice is now %s", voice_id)
 
     def _apply_settings(self, settings: dict[str, Any]) -> None:
+        muted = bool(settings.get("mic_muted"))
+        if muted != self.muted:
+            self.muted = muted
+            log.info("microphone %s", "muted" if muted else "listening")
         threshold = WAKE_THRESHOLDS.get(settings.get("wake_sensitivity", "medium"))
         if threshold and threshold != self.wake.threshold:
             self.wake.threshold = threshold
@@ -190,6 +195,8 @@ class VoiceLoop:
         self.events.send("state", state="idle")
         while True:
             frame = self.mic.read()
+            if self.muted:
+                continue   # frames are still drained so unmuting starts fresh
             if (score := self.wake.detect(frame)) is not None:
                 log.info("wake word (%.2f)", score)
                 self.wake.reset()

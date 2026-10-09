@@ -7,6 +7,10 @@ export const connected = writable(false);
 export const timers = writable([]);
 export const devices = writable([]);
 export const found = writable([]);
+export const lists = writable({});
+export const scenes = writable([]);
+// Screen mode pushed by core: 'night' (black until touched) or 'on'.
+export const screenMode = writable('on');
 // Each voice event from taco-voice: {type: 'state'|'heard'|'tool'|'reply', ...}
 export const voiceEvents = writable(null);
 
@@ -18,6 +22,17 @@ function handle(msg) {
       timers.set(msg.timers ?? []);
       devices.set(msg.devices ?? []);
       found.set(msg.found ?? []);
+      lists.set(msg.lists ?? {});
+      scenes.set(msg.scenes ?? []);
+      break;
+    case 'lists':
+      lists.set(msg.lists);
+      break;
+    case 'scenes':
+      scenes.set(msg.scenes);
+      break;
+    case 'screen':
+      screenMode.set(msg.mode);
       break;
     case 'devices':
       devices.set(msg.devices);
@@ -90,3 +105,8 @@ export const setLevel = (id, level) => post('/api/devices/control', { ids: [id],
 export const setRoomPower = (ids, on) => post('/api/devices/control', { ids, on });
 export const scanDevices = () => post('/api/devices/scan');
 export const addDevice = (key, name, room) => post('/api/devices', { key, name, room });
+
+export const toggleItem = (id, done) => post(`/api/lists/items/${id}`, { done }, 'PATCH');
+export const deleteItem = (id) => post(`/api/lists/items/${id}`, undefined, 'DELETE');
+export const clearDone = (name) => post(`/api/lists/${encodeURIComponent(name)}?done_only=true`, undefined, 'DELETE');
+export const runScene = (name) => post(`/api/scenes/${encodeURIComponent(name)}/run`);

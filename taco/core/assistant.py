@@ -16,6 +16,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from .devices.match import resolve
+from .lists import canonical, split_items
 from .intents import Intent, normalize, parse, say_clock, say_duration
 from .timers import Timer
 
@@ -75,6 +76,8 @@ class Assistant:
             if answer and len(answer.split()) <= 4:
                 intent = Intent(pending.name, {**pending.slots, key: answer})
         self.pending = None
+        if intent is None and self.state.scenes.get(text):
+            intent = Intent("scene", {"name": text})   # "good night", "movie time"
         if intent is None:
             return {"handled": False}
         log.info("intent %s %s", intent.name, intent.slots)
@@ -262,6 +265,101 @@ class Assistant:
                 parts.append(f"{d['name']} is {'on' if st.on else 'off'}{level}")
         text = parts[0] if len(parts) == 1 else ", ".join(parts[:-1]) + f", and {parts[-1]}"
         return _reply(text + ".")
+
+    # -- lists -----------------------------------------------------------------
+
+    @staticmethod
+    def _list_name(name: str | None) -> str:
+        n = canonical(name)
+        return "to-do list" if n == "to do" else f"{n} list"
+
+    async def _do_list_add(self, list: str | None, items: str) -> dict[str, Any]:
+        wanted = split_items(items)
+        added = self.state.lists.add(list, wanted)
+        await self.state.broadcast_lists()
+        where = self._list_name(list)
+        if not added:
+            return _reply(f"{_sentence(_join(wanted))} {'is' if len(wanted) == 1 else 'are'} already on your {where}.")
+        return _reply(f"Added {_join(added)} to your {where}.")
+
+    async def _do_list_remove(self, list: str | None, items: str) -> dict[str, Any]:
+        wanted = split_items(items)
+        removed = self.state.lists.remove(list, wanted)
+        await self.state.broadcast_lists()
+        if not removed:
+            return _reply(f"I don't see {_join(wanted)} on your {self._list_name(list)}.")
+        return _reply(f"Removed {_join(removed)}.")
+
+    async def _do_list_read(self, list: str | None) -> dict[str, Any]:
+        items = [i["text"] for i in self.state.lists.items(list) if not i["done"]]
+        where = self._list_name(list)
+        if not items:
+            return _reply(f"Your {where} is empty.")
+        if len(items) > 10:
+            shown = ", ".join(items[:10])
+            return _reply(f"You have {len(items)} things on your {where}. The first ten are {shown}.")
+        noun = "thing" if len(items) == 1 else "things"
+        return _reply(f"You have {len(items)} {noun} on your {where}: {_join(items)}.")
+
+    async def _do_list_clear(self, list: str | None) -> dict[str, Any]:
+        self.state.lists.clear(list)
+        await self.state.broadcast_lists()
+        return _reply(f"Cleared your {self._list_name(list)}.")
+
+    # -- scenes, briefing, microphone ------------------------------------------
+
+    async def _do_scene(self, name: str) -> dict[str, Any]:
+        scene = self.state.scenes.get(name)
+        if scene is None:
+            return {"handled": False}   # Hermes can offer to create it
+        speech = await self.state.run_scene(scene)
+        return _reply(speech or "OK.")
+
+    async def _do_scene_save(self, name: str) -> dict[str, Any]:
+        actions = []
+        for d in self.state.devices.payload():
+            st = d["state"]
+            if st["online"] is False or st["on"] is None:
+                continue
+            action: dict[str, Any] = {"type": "devices", "ids": [d["id"]], "on": bool(st["on"])}
+            if st["on"] and st["level"] is not None:
+                action["level"] = st["level"]
+            actions.append(action)
+        if not actions:
+            return _reply("I couldn't read any device states to save.")
+        self.state.scenes.save(name, actions)
+        return _reply(f"Saved. Say {name} any time to set things up like this again.")
+
+    async def _do_briefing(self) -> dict[str, Any]:
+        return _reply(self.briefing())
+
+    def briefing(self) -> str:
+        now = datetime.now()
+        part = "morning" if now.hour < 12 else "afternoon" if now.hour < 17 else "evening"
+        lines = [f"Good {part}! It's {now.strftime('%-I:%M %p')} on {now.strftime('%A')}."]
+        if w := self.state.weather:
+            c, today = w["current"], w["today"]
+            line = (f"It's {c['temp']} degrees and {c['condition'].lower()}, "
+                    f"with a high of {today['high']} and a low of {today['low']}")
+            if today["precip"] and today["precip"] >= 30:
+                line += f", and a {today['precip']} percent chance of rain"
+            lines.append(line + ".")
+        for alert in getattr(self.state, "alerts", [])[:2]:
+            lines.append(f"Weather alert: {alert['event']}.")
+        upcoming = [t for t in self.timers.all() if t.kind in ("alarm", "reminder") and t.state == "running"
+                    and datetime.fromtimestamp(t.ends_at).date() == now.date()]
+        for t in upcoming[:3]:
+            when = datetime.fromtimestamp(t.ends_at).strftime("%-I:%M %p")
+            lines.append(f"Reminder at {when}: {t.message}." if t.kind == "reminder" else f"Your alarm is set for {when}.")
+        shopping = [i for i in self.state.lists.items("shopping") if not i["done"]]
+        if shopping:
+            lines.append(f"You have {len(shopping)} {'thing' if len(shopping) == 1 else 'things'} on your shopping list.")
+        return " ".join(lines)
+
+    async def _do_mic_mute(self) -> dict[str, Any]:
+        self.state.db.update_settings({"mic_muted": True})
+        await self.state.hub.broadcast({"type": "settings", "settings": self.state.db.settings()})
+        return _reply("OK, I've stopped listening. Tap the microphone on the screen when you want me back.")
 
     # -- quick info ----------------------------------------------------------
 

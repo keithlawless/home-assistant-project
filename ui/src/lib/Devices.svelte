@@ -2,7 +2,7 @@
   // Devices sheet: tiles grouped by room (tap to toggle), brightness for
   // dimmable devices, and discovery of new ones. Renaming and nicknames are
   // done by voice ("Taco, rename the living room lamp one to reading lamp").
-  import { devices, found, settings, setPower, setLevel, setRoomPower, scanDevices, addDevice } from './store.js';
+  import { devices, found, settings, scenes, runScene, setPower, setLevel, setRoomPower, scanDevices, addDevice } from './store.js';
 
   let { onClose } = $props();
 
@@ -69,6 +69,16 @@
   </header>
 
   {#if error}<div class="error">{error}</div>{/if}
+
+  {#if $scenes.length && $devices.length}
+    <div class="scenes">
+      {#each $scenes as sc (sc.name)}
+        <button onclick={() => act(sc.name, () => runScene(sc.name))}>
+          {sc.name.replace(/^./, (c) => c.toUpperCase()).replace("i'm", "I'm")}
+        </button>
+      {/each}
+    </div>
+  {/if}
 
   {#if $found.length}
     <section class="found">
@@ -177,6 +187,8 @@
   .tile-state { font-size: 15px; color: var(--muted); }
   .tile.on .tile-state { color: var(--accent); }
   input[type='range'] { width: calc(100% - 32px); margin: 0 16px 14px; accent-color: var(--accent); }
+  .scenes { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 16px; }
+  .scenes button { font-size: 17px; padding: 10px 18px; background: var(--panel-2); }
   .found { background: var(--panel); border-radius: var(--radius); padding: 16px 18px; }
   .found h2 { margin-bottom: 8px; }
   .found-row { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-top: 1px solid #22304d; }

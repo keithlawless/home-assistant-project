@@ -6,7 +6,7 @@
   import { weather, settings } from './store.js';
   import { now, formatTime, ampm, formatDate, hourLabel, dayLabel } from './time.js';
 
-  let { onSettings, onDevices } = $props();
+  let { onSettings, onDevices, onLists } = $props();
 
   let h24 = $derived($settings?.clock_24h ?? false);
   let w = $derived($weather);
@@ -39,6 +39,13 @@
       <div class="time">{formatTime($now, h24)}<span class="ampm">{ampm($now, h24)}</span></div>
       <div class="date">{formatDate($now)}</div>
       {#if w}<div class="place">{w.location}</div>{/if}
+      <button class="lists-btn" onclick={onLists} aria-label="Lists">
+        <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round">
+          <path d="M9 6h11M9 12h11M9 18h11M4 6h.01M4 12h.01M4 18h.01" />
+        </svg>
+        Lists
+      </button>
       <button class="devices-btn" onclick={onDevices} aria-label="Devices">
         <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="2"
              stroke-linecap="round" stroke-linejoin="round">
@@ -109,11 +116,13 @@
     position: absolute; right: -8px; bottom: 0;
     background: transparent; color: var(--muted); padding: 10px;
   }
-  .devices-btn {
-    position: absolute; right: 52px; bottom: 4px;
+  .lists-btn, .devices-btn {
+    position: absolute; bottom: 4px;
     display: flex; align-items: center; gap: 8px;
     background: var(--panel); color: var(--text); font-size: 17px; padding: 8px 16px;
   }
+  .devices-btn { right: 52px; }
+  .lists-btn { right: 190px; }
 
   .strip {
     display: grid;
