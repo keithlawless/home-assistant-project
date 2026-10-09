@@ -32,6 +32,7 @@ from .devices.matter import MatterDriver
 from .hub import Hub
 from .intents import normalize, parse_clock
 from .lists import ListStore
+from .media import RadioPlayer, search_stations
 from .scenes import SceneStore, scene_key
 from .scheduler import Scheduler, ScheduleStore, describe
 from .weather import fetch_forecast, geocode, locate_by_ip
@@ -64,7 +65,8 @@ class State:
         self._last_devices = ""
         self.lists = ListStore(self.db.conn, self.db.lock)
         self.scenes = SceneStore(self.db.conn, self.db.lock)
-        self.media = None   # radio player, added with music support
+        self.media = RadioPlayer(self.cfg["audio"]["output_device"], on_change=self.broadcast_media)
+        self.recipe: dict[str, Any] | None = None
         self.alerts: list[dict[str, Any]] = []
         self._announced_alerts: set[str] = set()
         self.schedules = ScheduleStore(self.db.conn, self.db.lock)
@@ -78,6 +80,19 @@ class State:
             set_power=self._vacation_power,
         )
         self.assistant = Assistant(self)
+
+    async def broadcast_media(self) -> None:
+        await self.hub.broadcast({"type": "media", "media": self.media.status()})
+
+    async def broadcast_recipe(self) -> None:
+        await self.hub.broadcast({"type": "recipe", "recipe": self.recipe})
+
+    async def play_radio(self, query: str) -> dict[str, Any] | None:
+        stations = await search_stations(self.http, query)
+        if stations:
+            await self.media.play(stations[0])
+            return stations[0]
+        return None
 
     async def _vacation_power(self, ids: list[int], on: bool) -> None:
         await self.devices.control(ids, "power", on)
@@ -146,7 +161,7 @@ class State:
                 speech.append(self.assistant.briefing())
             elif kind == "night":
                 await self.set_screen("night")
-            elif kind == "media_stop" and self.media:
+            elif kind == "media_stop":
                 await self.media.stop()
             elif kind == "scene" and (scene := self.scenes.get(action.get("name", ""))):
                 more, bad = await self.run_actions(scene["actions"])
@@ -175,7 +190,8 @@ class State:
         return {"weather": self.weather, "settings": self.db.settings(), "voice": self.voice,
                 "timers": self.timers_payload(), "devices": self.devices.payload(),
                 "found": self.devices.found_payload(), "lists": self.lists_payload(),
-                "scenes": self.scenes.all(), "schedules": self.schedules_payload(), "alerts": self.alerts}
+                "scenes": self.scenes.all(), "schedules": self.schedules_payload(), "alerts": self.alerts,
+                "media": self.media.status(), "recipe": self.recipe}
 
     async def broadcast_timers(self) -> None:
         await self.hub.broadcast({"type": "timers", "timers": self.timers_payload()})
@@ -224,6 +240,7 @@ async def lifespan(app: FastAPI):
     yield
     for task in tasks:
         task.cancel()
+    await state.media.stop(notify=False)
     await state.http.aclose()
 
 
@@ -632,6 +649,79 @@ async def announce(body: dict[str, Any]) -> dict[str, bool]:
     return {"ok": True}
 
 
+# --- radio ---------------------------------------------------------------------
+
+@app.get("/api/media")
+async def media_status() -> dict[str, Any] | None:
+    return state.media.status()
+
+
+@app.post("/api/media/play")
+async def play_media(body: dict[str, Any]) -> dict[str, Any]:
+    """body: {"query": "WBUR" | "jazz"} or {"name", "url"} of a station."""
+    try:
+        if body.get("url"):
+            station = {"name": body.get("name") or "Radio", "url": body["url"]}
+            await state.media.play(station)
+        elif not (station := await state.play_radio(str(body.get("query", "")))):
+            raise HTTPException(404, f"no station found for {body.get('query')!r}")
+    except httpx.HTTPError as e:
+        raise HTTPException(502, f"station search failed: {e}") from None
+    return station
+
+
+@app.post("/api/media/stop")
+async def stop_media() -> dict[str, bool]:
+    await state.media.stop()
+    return {"ok": True}
+
+
+@app.get("/api/media/search")
+async def search_media(q: str) -> list[dict[str, Any]]:
+    try:
+        return await search_stations(state.http, q)
+    except httpx.HTTPError as e:
+        raise HTTPException(502, f"station search failed: {e}") from None
+
+
+# --- recipe mode -------------------------------------------------------------------
+
+@app.get("/api/recipe")
+async def get_recipe() -> dict[str, Any] | None:
+    return state.recipe
+
+
+@app.put("/api/recipe")
+async def show_recipe(body: dict[str, Any]) -> dict[str, Any]:
+    """body: {"title", "ingredients": [...], "steps": [...], "servings"?}. Opens on screen."""
+    steps = [str(x) for x in body.get("steps", []) if str(x).strip()]
+    if not body.get("title") or not steps:
+        raise HTTPException(400, "a recipe needs a title and steps")
+    state.recipe = {"title": str(body["title"]), "servings": body.get("servings"),
+                    "ingredients": [str(x) for x in body.get("ingredients", [])], "steps": steps, "step": 0}
+    await state.broadcast_recipe()
+    return state.recipe
+
+
+@app.post("/api/recipe/step")
+async def recipe_step(body: dict[str, Any]) -> dict[str, Any]:
+    """body: {"delta": 1 | -1} or {"index": n} (0-based)."""
+    if state.recipe is None:
+        raise HTTPException(404, "no recipe open")
+    n = len(state.recipe["steps"])
+    target = int(body["index"]) if "index" in body else state.recipe["step"] + int(body.get("delta", 1))
+    state.recipe["step"] = max(0, min(n - 1, target))
+    await state.broadcast_recipe()
+    return state.recipe
+
+
+@app.delete("/api/recipe")
+async def close_recipe() -> dict[str, bool]:
+    state.recipe = None
+    await state.broadcast_recipe()
+    return {"ok": True}
+
+
 @app.post("/api/screen")
 async def screen(body: dict[str, Any]) -> dict[str, bool]:
     """body: {"mode": "night" | "on"}"""
@@ -644,6 +734,8 @@ async def voice_event(event: dict[str, Any]) -> dict[str, bool]:
     """State updates from taco-voice: listening, heard text, tool use, reply."""
     if event.get("type") == "state":
         state.voice = {"state": event.get("state", "idle")}
+        # Turn music down while Taco is listening or talking.
+        await state.media.duck(state.voice["state"] != "idle")
     await state.hub.broadcast({"type": "voice", "event": event})
     return {"ok": True}
 

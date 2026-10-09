@@ -11,6 +11,8 @@ export const lists = writable({});
 export const scenes = writable([]);
 export const schedules = writable([]);
 export const alerts = writable([]);
+export const media = writable(null);    // {station} while the radio plays
+export const recipe = writable(null);   // {title, ingredients, steps, step}
 // Screen mode pushed by core: 'night' (black until touched) or 'on'.
 export const screenMode = writable('on');
 // Each voice event from taco-voice: {type: 'state'|'heard'|'tool'|'reply', ...}
@@ -28,6 +30,14 @@ function handle(msg) {
       scenes.set(msg.scenes ?? []);
       schedules.set(msg.schedules ?? []);
       alerts.set(msg.alerts ?? []);
+      media.set(msg.media ?? null);
+      recipe.set(msg.recipe ?? null);
+      break;
+    case 'media':
+      media.set(msg.media);
+      break;
+    case 'recipe':
+      recipe.set(msg.recipe);
       break;
     case 'schedules':
       schedules.set(msg.schedules);
@@ -121,3 +131,6 @@ export const deleteItem = (id) => post(`/api/lists/items/${id}`, undefined, 'DEL
 export const clearDone = (name) => post(`/api/lists/${encodeURIComponent(name)}?done_only=true`, undefined, 'DELETE');
 export const runScene = (name) => post(`/api/scenes/${encodeURIComponent(name)}/run`);
 export const setScheduleEnabled = (id, enabled) => post(`/api/schedules/${id}`, { enabled }, 'PATCH');
+export const stopMedia = () => post('/api/media/stop');
+export const recipeStep = (delta) => post('/api/recipe/step', { delta });
+export const closeRecipe = () => post('/api/recipe', undefined, 'DELETE');

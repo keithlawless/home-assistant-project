@@ -384,6 +384,50 @@ def announce(text: str) -> str:
     return "Announced."
 
 
+# --- radio ---------------------------------------------------------------------
+
+@mcp.tool()
+def find_radio_stations(query: str) -> list[dict]:
+    """Search internet radio by station name, call sign or genre ("WBUR", "jazz",
+    "BBC Radio 4", "classic rock")."""
+    return _call("GET", "/api/media/search", params={"q": query})
+
+
+@mcp.tool()
+def play_radio(query: str | None = None, url: str | None = None, name: str | None = None) -> dict:
+    """Play internet radio: the best match for `query`, or a specific stream
+    `url` (with its `name`) from find_radio_stations."""
+    body = {"url": url, "name": name} if url else {"query": query or "jazz"}
+    return _call("POST", "/api/media/play", json=body)
+
+
+@mcp.tool()
+def stop_music() -> str:
+    """Stop the radio."""
+    _call("POST", "/api/media/stop")
+    return "Stopped."
+
+
+# --- recipes ---------------------------------------------------------------------
+
+@mcp.tool()
+def show_recipe(title: str, ingredients: list[str], steps: list[str], servings: int | None = None) -> str:
+    """Open a recipe on the kitchen screen in hands-free mode. Find a good recipe
+    (web search if needed), scale quantities to the servings asked for, and keep
+    each step to one or two short sentences. Then tell the user the ingredients
+    are on screen and to say "next step" when ready; Taco handles next,
+    previous, repeat, "read the ingredients" and "close the recipe" itself."""
+    _call("PUT", "/api/recipe", json={"title": title, "ingredients": ingredients, "steps": steps,
+                                      "servings": servings})
+    return f"Showing {title}: {len(ingredients)} ingredients, {len(steps)} steps."
+
+
+@mcp.tool()
+def current_recipe() -> dict | None:
+    """The recipe open on screen and the step the cook is on (0-based), if any."""
+    return _call("GET", "/api/recipe")
+
+
 # --- Taco itself ----------------------------------------------------------------
 
 @mcp.tool()

@@ -3,6 +3,7 @@
   // Laid out for the 1024x600 Kogoda panel.
   import WeatherIcon from './WeatherIcon.svelte';
   import TimerChips from './TimerChips.svelte';
+  import MediaChip from './MediaChip.svelte';
   import { weather, settings, alerts } from './store.js';
   import { now, formatTime, ampm, formatDate, hourLabel, dayLabel } from './time.js';
 
@@ -72,7 +73,10 @@
     </div>
   </section>
 
-  <TimerChips />
+  <div class="chip-row">
+    <MediaChip />
+    <TimerChips />
+  </div>
 
   {#if w}
     <section class="strip hourly">
@@ -108,6 +112,8 @@
     gap: 12px;
   }
   .top { display: flex; justify-content: space-between; }
+  .chip-row { display: flex; gap: 10px; overflow: hidden; }
+  .chip-row:empty { display: none; }
   .alert {
     display: flex; align-items: center; gap: 10px;
     background: #78350f; color: #fef3c7; border-radius: 12px; padding: 8px 14px; font-size: 17px;

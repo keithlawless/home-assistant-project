@@ -9,7 +9,8 @@
   import Screensaver from './lib/Screensaver.svelte';
   import VoiceOverlay from './lib/VoiceOverlay.svelte';
   import Ringing from './lib/Ringing.svelte';
-  import { connect, connected, settings, timers, voiceEvents, screenMode, saveSettings } from './lib/store.js';
+  import Recipe from './lib/Recipe.svelte';
+  import { connect, connected, settings, timers, voiceEvents, screenMode, saveSettings, recipe } from './lib/store.js';
 
   const SHIFT_EVERY_MS = 3 * 60_000;
   const SHIFT_PX = 4;
@@ -86,6 +87,7 @@
 
     const idleCheck = setInterval(() => {
       const minutes = $settings?.screensaver_minutes ?? 5;
+      if ($recipe) return;   // keep the recipe on screen while cooking
       if (!saverOn && !night && Date.now() - lastActivity > minutes * 60_000) {
         if (inNightHours($settings?.night_hours)) {
           night = true;   // fully dark overnight instead of the clock screensaver
@@ -124,6 +126,7 @@
   {#if showSettings}
     <Settings onClose={() => (showSettings = false)} />
   {/if}
+  <Recipe />
   <VoiceOverlay />
   {#if $settings?.mic_muted}
     <button class="mic-off" onclick={() => saveSettings({ mic_muted: false })}>

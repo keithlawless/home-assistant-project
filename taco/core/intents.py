@@ -316,7 +316,44 @@ def parse(raw: str, now: datetime | None = None) -> Intent | None:
 
     # Lists keep commas so "milk, eggs and bread" splits into three items.
     return (_list_intent(normalize(raw, keep_commas=True).rstrip(",")) or _household_intent(text)
-            or _device_intent(text))
+            or _media_intent(text) or _recipe_intent(text) or _device_intent(text))
+
+
+def _media_intent(text: str) -> Intent | None:
+    """Internet radio."""
+    if re.fullmatch(r"(?:stop|turn off|pause|kill|end) (?:the |this )?(?:music|radio|station|song)", text):
+        return Intent("media_stop")
+    if re.fullmatch(r"what s (?:playing|this|this station|on)|what (?:station|song) is (?:this|playing)", text):
+        return Intent("media_status")
+    # Only "play"/"put on": "turn on the kitchen light" is a device, not a station.
+    if m := re.fullmatch(r"(?:play|put on) (?:some |the |a )?(?P<q>.+?)"
+                         r"(?: radio| station| on the radio| music)?", text):
+        q = m.group("q").strip()
+        if q in ("music", "radio", "some music", "something", "the radio"):
+            q = ""
+        return Intent("media_play", {"query": q})
+    return None
+
+
+def _recipe_intent(text: str) -> Intent | None:
+    """Hands-free recipe navigation (only acts when a recipe is open)."""
+    text = text.removesuffix(" please")
+    if re.fullmatch(r"(?:next|next step|what s next|what s the next step|ok next|okay next|done next|go on)", text):
+        return Intent("recipe_nav", {"action": "next"})
+    if re.fullmatch(r"(?:previous|previous step|go back|back|last step|the step before)", text):
+        return Intent("recipe_nav", {"action": "previous"})
+    if re.fullmatch(r"(?:repeat|repeat that|repeat the step|say that again|what was that|what step am i on"
+                    r"|read the step|read that again)", text):
+        return Intent("recipe_nav", {"action": "repeat"})
+    if re.fullmatch(r"(?:read |what are )?(?:me )?the ingredients|what do i need", text):
+        return Intent("recipe_nav", {"action": "ingredients"})
+    if re.fullmatch(r"(?:start over|go to the beginning|first step)", text):
+        return Intent("recipe_nav", {"action": "first"})
+    if m := re.fullmatch(r"(?:go to |skip to )?step (?P<n>\d{1,2})", text):
+        return Intent("recipe_nav", {"action": "goto", "n": int(m.group("n"))})
+    if re.fullmatch(r"(?:close|exit|end|done with|finish|stop) (?:the )?(?:recipe|cooking)|i m done cooking", text):
+        return Intent("recipe_nav", {"action": "close"})
+    return None
 
 
 _LIST = r"(?:the |my |our )?(?P<list>[a-z ]*?)\s*list"

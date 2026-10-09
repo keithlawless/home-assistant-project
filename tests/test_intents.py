@@ -158,3 +158,17 @@ def test_household():
     assert p("Save this as movie time").slots == {"name": "movie time"}
     assert p("Activate movie time mode").slots == {"name": "movie time"}
     assert p("Turn on the living room") .name == "power"   # not a scene
+
+
+def test_media_and_recipe():
+    assert p("Play WBUR").slots == {"query": "wbur"}
+    assert p("Play some jazz radio").slots == {"query": "jazz"}
+    assert p("Play some music").slots == {"query": ""}
+    assert p("Stop the music").name == "media_stop"
+    assert p("What's playing?").name == "media_status"
+    assert p("Next step").slots == {"action": "next"}
+    assert p("Repeat that").slots == {"action": "repeat"}
+    assert p("Read me the ingredients").slots == {"action": "ingredients"}
+    assert p("Go to step 4").slots == {"action": "goto", "n": 4}
+    assert p("Close the recipe").slots == {"action": "close"}
+    assert p("Turn on the kitchen light").name == "power"     # not radio

@@ -15,6 +15,8 @@ import time
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
+import httpx
+
 from .devices.match import resolve
 from .lists import canonical, split_items
 from .intents import Intent, normalize, parse, say_clock, say_duration
@@ -168,7 +170,9 @@ class Assistant:
         return _reply(f"Resumed {t.describe()}. {say_duration(t.remaining())} to go.")
 
     async def _do_stop(self) -> dict[str, Any]:
-        self.timers.stop_ringing()
+        # "Stop" silences a ringing alarm; with nothing ringing it stops the music.
+        if not self.timers.stop_ringing() and self.state.media.playing:
+            await self.state.media.stop()
         await self.state.hub.broadcast({"type": "voice_command", "command": "stop"})
         return _reply(silent=True)
 
@@ -360,6 +364,61 @@ class Assistant:
         self.state.db.update_settings({"mic_muted": True})
         await self.state.hub.broadcast({"type": "settings", "settings": self.state.db.settings()})
         return _reply("OK, I've stopped listening. Tap the microphone on the screen when you want me back.")
+
+    # -- radio ------------------------------------------------------------------
+
+    async def _do_media_play(self, query: str) -> dict[str, Any]:
+        last = self.state.media.station
+        try:
+            if not query and last:
+                await self.state.media.play(last)
+                return _reply(f"Playing {last['name']}.")
+            station = await self.state.play_radio(query or "jazz")
+        except (httpx.HTTPError, OSError) as e:
+            log.warning("radio failed: %s", e)
+            return _reply("Sorry, I couldn't reach the radio station directory.")
+        if station is None:
+            return {"handled": False}   # Hermes may know a better station name
+        return _reply(f"Playing {station['name']}.")
+
+    async def _do_media_stop(self) -> dict[str, Any]:
+        await self.state.media.stop()
+        return _reply(silent=True)
+
+    async def _do_media_status(self) -> dict[str, Any]:
+        st = self.state.media.status()
+        return _reply(f"This is {st['station']}." if st else "Nothing's playing right now.")
+
+    # -- recipe mode -------------------------------------------------------------
+
+    async def _do_recipe_nav(self, action: str, n: int | None = None) -> dict[str, Any]:
+        r = self.state.recipe
+        if r is None:
+            return {"handled": False}
+        steps, total = r["steps"], len(r["steps"])
+        if action == "close":
+            self.state.recipe = None
+            await self.state.broadcast_recipe()
+            return _reply("Closed the recipe. Enjoy!")
+        if action == "ingredients":
+            items = r["ingredients"]
+            return _reply(f"You'll need {_join(items)}." if items else "This recipe doesn't list ingredients.")
+        if action == "next":
+            if r["step"] >= total - 1:
+                return _reply("That was the last step. Enjoy!")
+            r["step"] += 1
+        elif action == "previous":
+            r["step"] = max(0, r["step"] - 1)
+        elif action == "first":
+            r["step"] = 0
+        elif action == "goto" and n:
+            if not 1 <= n <= total:
+                return _reply(f"This recipe has {total} steps.")
+            r["step"] = n - 1
+        await self.state.broadcast_recipe()
+        i = r["step"]
+        last = " That's the last step." if i == total - 1 and total > 1 else ""
+        return _reply(f"Step {i + 1} of {total}. {steps[i]}{last}")
 
     # -- quick info ----------------------------------------------------------
 
