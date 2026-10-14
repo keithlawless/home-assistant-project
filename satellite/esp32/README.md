@@ -8,9 +8,9 @@ brew install platformio
 ```
 The first build downloads the ESP-IDF toolchain into `~/.platformio`, which takes a few minutes and about 1 GB.
 
-The project pins `espressif32@7.1.3` (ESP-IDF 6.1). Older platform releases ship an Intel-only CMake, which fails on Apple Silicon without Rosetta ("Bad CPU type in executable"). If a build fails with `No module named 'intelhex'`, install esptool into PlatformIO's Python environment, for example `$(brew --prefix platformio)/libexec/bin/pip install esptool`.
+The project pins `espressif32@7.1.3` (ESP-IDF 6.1). Older platform releases ship an Intel-only CMake, which fails on Apple Silicon without Rosetta ("Bad CPU type in executable"). If the build fails with `No module named 'intelhex'`, install it into the Python environment that Homebrew's PlatformIO uses: `$(brew --prefix platformio)/libexec/bin/python -m pip install intelhex`. A `brew upgrade platformio` replaces that environment, so run the command again after upgrading.
 
-## Configure
+## 1. Configure the firmware
 ```sh
 cd satellite/esp32
 cp main/secrets.example.h main/secrets.h
@@ -22,7 +22,24 @@ Edit `main/secrets.h` and fill in:
 
 `secrets.h` is git-ignored.
 
-## Flash
+## 2. Tell Taco about it
+taco-voice only listens on the satellite port once a satellite is configured, so do this before flashing. Add this to `/srv/taco/config.toml` on the kitchen Pi, using the same token as `secrets.h`:
+```toml
+[[audio.satellites]]
+name  = "living room"
+port  = 10700
+token = "<SAT_TOKEN>"
+allow = ["192.168.4.0/24"]
+```
+Then restart taco-voice and leave its log open in another terminal:
+```sh
+systemctl --user restart taco-voice
+journalctl --user-unit taco-voice -f
+```
+
+For a stable setup, give the board a DHCP reservation in the router and narrow `allow` to that one address, for example `["192.168.4.50/32"]`.
+
+## 3. Flash
 1. Plug the board into the Mac with a USB-C data cable.
 2. Run:
    ```sh
@@ -31,26 +48,18 @@ Edit `main/secrets.h` and fill in:
    ```
 3. If the upload can't find the board, hold **BOOT**, tap **RESET**, release **BOOT**, and run the upload again.
 
+## 4. Check it
 The monitor should show:
 ```
 mic ready: 16000 Hz, gain 30.0 dB
 wifi up, ip 192.168.4.x
 streaming to 192.168.4.239:10700
 ```
-Until Taco is configured, the last line reads `can't reach Taco … retrying`.
+These lines print once, at boot. The board uses native USB, so opening the monitor doesn't reset it the way older ESP32 boards reset. If the monitor attaches after boot, it stays blank. Press **RESET** with the monitor open to see them. Once streaming starts, the board logs nothing more. The monitor's "Please build project in debug configuration" notice is harmless.
 
-## Tell Taco about it
-Add this to `/srv/taco/config.toml` on the kitchen Pi. Use the same token as `secrets.h`.
-```toml
-[[audio.satellites]]
-name  = "living room"
-port  = 10700
-token = "<SAT_TOKEN>"
-allow = ["192.168.4.0/24"]
-```
-Then run `systemctl --user restart taco-voice`. Its log should show `satellite 'living room': connected from 192.168.4.x`. Saying "Hey Taco" in the living room then logs `wake word (0.xx, living room)`.
+The taco-voice log on the Pi should show `satellite 'living room': connected from 192.168.4.x`. Saying "Hey Taco" in the living room then logs `wake word (0.xx, living room)`.
 
-For a stable setup, give the board a DHCP reservation in the router and narrow `allow` to that one address, for example `["192.168.4.50/32"]`.
+If the monitor shows `can't reach Taco at 192.168.4.239:10700; retrying`, nothing on the Pi is listening on that port. Check that the `[[audio.satellites]]` entry is in `config.toml` and that taco-voice was restarted after adding it. The board retries on its own, so you don't need to reflash.
 
 ## Tuning
 - **Mic gain:** `MIC_GAIN_DB` in `secrets.h`, max 37.5 dB. Raise it if Taco misses quiet speech from the couch; lower it if loud speech distorts.

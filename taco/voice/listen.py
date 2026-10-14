@@ -28,6 +28,13 @@ def record_request(mic: Microphone, *, start_timeout_s: float, end_silence_s: fl
         try:
             frame = mic.read(timeout=1.0)
         except queue.Empty:
+            # A satellite can stop streaming mid-request (Wi-Fi drop, reboot);
+            # still honour the timeouts rather than wait for it forever.
+            elapsed = time.monotonic() - began
+            if not speech_started and elapsed > start_timeout_s:
+                return None
+            if speech_started and elapsed >= max_seconds:
+                return np.concatenate(frames)
             continue
         frames.append(frame)
         voiced = sum(

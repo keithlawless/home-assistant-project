@@ -72,5 +72,5 @@ if it wakes up on its own, set it to *Low*. The voice log shows each
 detection with its score:
 
 ```bash
-journalctl --user -u taco-voice -f | grep -E "wake word|barge-in"
+journalctl --user-unit taco-voice -f | grep -E "wake word|barge-in"
 ```

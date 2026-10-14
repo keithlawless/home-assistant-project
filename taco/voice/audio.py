@@ -101,6 +101,8 @@ class NetworkMicrophone(_FrameSource):
     replaces the old, which may be a half-open socket nobody will close.
     """
 
+    sample_rate = 16000   # fixed by the satellite protocol
+
     def __init__(self, name: str, port: int, token: str, allow: list[str] | None = None,
                  host: str = "0.0.0.0", ready: threading.Event | None = None):
         super().__init__(name, ready)

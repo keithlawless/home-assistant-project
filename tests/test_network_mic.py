@@ -75,3 +75,12 @@ def test_reconnect_replaces_old_stream():
 def test_requires_token():
     with pytest.raises(ValueError):
         NetworkMicrophone("x", 0, "")
+
+
+def test_record_request_from_satellite():
+    # The request recorder reads mic.sample_rate; a satellite wake once crashed taco-voice here.
+    from taco.voice.listen import record_request
+    mic = start_mic()
+    with connect(mic) as sock:
+        sock.sendall(np.zeros(FRAME_SAMPLES * 4, dtype=np.int16).tobytes())
+        assert record_request(mic, start_timeout_s=0.1, end_silence_s=0.5, max_seconds=2) is None
