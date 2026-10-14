@@ -7,14 +7,18 @@ essential: without it pw-record/pw-play wrap stdio in an .au container and
 the piped stream comes through as silence.
 
 The mic runs continuously into a queue of 80 ms int16 frames (the frame size
-openWakeWord expects). Playback runs on its own thread so the next sentence
-can be synthesized while the current one plays.
+openWakeWord expects). Mic satellites in other rooms stream the same frames
+over the LAN (NetworkMicrophone). Playback runs on its own thread so the
+next sentence can be synthesized while the current one plays.
 """
 
 from __future__ import annotations
 
+import hmac
+import ipaddress
 import logging
 import queue
+import socket
 import subprocess
 import threading
 
@@ -30,11 +34,44 @@ def _target_args(device: str | None) -> list[str]:
     return ["--target", device] if device else []
 
 
-class Microphone:
-    def __init__(self, sample_rate: int = 16000, device: str | None = None):
+class _FrameSource:
+    """A queue of 80 ms int16 frames fed by a background thread. `ready`, if
+    given, is set on every frame so one loop can wait on several sources."""
+
+    def __init__(self, name: str, ready: threading.Event | None = None):
+        self.name = name
+        self.ready = ready
+        self.frames: queue.Queue[np.ndarray] = queue.Queue(maxsize=200)
+
+    def _put(self, chunk: bytes) -> None:
+        try:
+            self.frames.put_nowait(np.frombuffer(chunk, dtype=np.int16))
+        except queue.Full:
+            pass  # consumer is busy (e.g. during STT); drop rather than block
+        if self.ready:
+            self.ready.set()
+
+    def read(self, timeout: float | None = None) -> np.ndarray:
+        return self.frames.get(timeout=timeout)
+
+    def read_nowait(self) -> np.ndarray | None:
+        try:
+            return self.frames.get_nowait()
+        except queue.Empty:
+            return None
+
+    def flush(self) -> None:
+        """Drop buffered audio, e.g. Taco's own voice captured while speaking."""
+        while self.read_nowait() is not None:
+            pass
+
+
+class Microphone(_FrameSource):
+    def __init__(self, sample_rate: int = 16000, device: str | None = None,
+                 name: str = "kitchen", ready: threading.Event | None = None):
+        super().__init__(name, ready)
         self.sample_rate = sample_rate
         self.device = device
-        self.frames: queue.Queue[np.ndarray] = queue.Queue(maxsize=200)
         self._proc: subprocess.Popen | None = None
 
     def start(self) -> None:
@@ -50,23 +87,107 @@ class Microphone:
             while chunk := self._proc.stdout.read(frame_bytes):
                 if len(chunk) < frame_bytes:
                     break
-                try:
-                    self.frames.put_nowait(np.frombuffer(chunk, dtype=np.int16))
-                except queue.Full:
-                    pass  # consumer is busy (e.g. during STT); drop rather than block
+                self._put(chunk)
             log.warning("pw-record exited (%s); restarting", self._proc.wait())
             threading.Event().wait(1.0)
 
-    def read(self, timeout: float | None = None) -> np.ndarray:
-        return self.frames.get(timeout=timeout)
 
-    def flush(self) -> None:
-        """Drop buffered audio, e.g. Taco's own voice captured while speaking."""
+class NetworkMicrophone(_FrameSource):
+    """A mic satellite in another room (see satellite/README.md).
+
+    The satellite connects over TCP, sends one handshake line
+    `TACO <name> <token>`, then streams raw 16 kHz mono s16 audio. Only one
+    connection is live at a time: a new one (the satellite restarting)
+    replaces the old, which may be a half-open socket nobody will close.
+    """
+
+    def __init__(self, name: str, port: int, token: str, allow: list[str] | None = None,
+                 host: str = "0.0.0.0", ready: threading.Event | None = None):
+        super().__init__(name, ready)
+        if not token:
+            raise ValueError(f"satellite {name!r} needs a token")
+        self.port = port
+        self.host = host
+        self._token = token
+        self._allow = [ipaddress.ip_network(a, strict=False) for a in (allow or [])]
+        self._lock = threading.Lock()
+        self._conn: socket.socket | None = None
+        self._server: socket.socket | None = None
+
+    def start(self) -> None:
+        self._server = socket.create_server((self.host, self.port))
+        self.port = self._server.getsockname()[1]   # when bound to port 0 (tests)
+        threading.Thread(target=self._accept, daemon=True, name=f"sat-{self.name}").start()
+        log.info("satellite %r: listening on port %d", self.name, self.port)
+
+    @property
+    def connected(self) -> bool:
+        return self._conn is not None
+
+    def _allowed(self, ip: str) -> bool:
+        if not self._allow:
+            return True
+        addr = ipaddress.ip_address(ip)
+        if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped:
+            addr = addr.ipv4_mapped
+        return any(addr in net for net in self._allow)
+
+    def _accept(self) -> None:
+        assert self._server
         while True:
-            try:
-                self.frames.get_nowait()
-            except queue.Empty:
+            conn, (ip, *_) = self._server.accept()
+            threading.Thread(target=self._serve, args=(conn, ip), daemon=True,
+                             name=f"sat-{self.name}-conn").start()
+
+    def _handshake(self, conn: socket.socket) -> bool:
+        conn.settimeout(5.0)
+        line = b""
+        while not line.endswith(b"\n") and len(line) < 256:
+            byte = conn.recv(1)
+            if not byte:
+                return False
+            line += byte
+        parts = line.decode(errors="replace").split()
+        return (len(parts) == 3 and parts[0] == "TACO"
+                and hmac.compare_digest(parts[2].encode(), self._token.encode()))
+
+    def _serve(self, conn: socket.socket, ip: str) -> None:
+        try:
+            if not self._allowed(ip):
+                log.warning("satellite %r: refused %s (not in allow list)", self.name, ip)
                 return
+            if not self._handshake(conn):
+                log.warning("satellite %r: bad handshake from %s", self.name, ip)
+                return
+            conn.settimeout(None)
+            conn.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            with self._lock:
+                old, self._conn = self._conn, conn
+            if old:
+                _close(old)
+            log.info("satellite %r: connected from %s", self.name, ip)
+            stream = conn.makefile("rb")
+            frame_bytes = FRAME_SAMPLES * 2
+            while len(chunk := stream.read(frame_bytes)) == frame_bytes:
+                if self._conn is not conn:
+                    break   # replaced by a newer connection
+                self._put(chunk)
+        except OSError as e:
+            log.info("satellite %r: %s", self.name, e)
+        finally:
+            with self._lock:
+                if self._conn is conn:
+                    self._conn = None
+                    log.warning("satellite %r: disconnected", self.name)
+            _close(conn)
+
+
+def _close(conn: socket.socket) -> None:
+    try:
+        conn.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass
+    conn.close()
 
 
 class Speaker:

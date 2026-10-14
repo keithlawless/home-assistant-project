@@ -19,11 +19,19 @@ DEFAULTS: dict = {
         # (from `wpctl status` / `pw-cli ls Node`) to pin a device, e.g. when
         # the speakerphone arrives.
         "input_device": None,
+        "input_name": "kitchen",   # room name for the local mic in logs
         "output_device": None,
         "sample_rate": 16000,
         # Listen for the wake word while Taco talks. Needs a mic with echo
         # cancellation (e.g. a USB speakerphone), or Taco hears itself.
         "barge_in": False,
+        # Mic satellites in other rooms (satellite/README.md), e.g.
+        #   [[audio.satellites]]
+        #   name = "living room"
+        #   port = 10700
+        #   token = "..."               # shared secret; keep it out of the repo
+        #   allow = ["192.168.4.0/24"]  # peers allowed to connect
+        "satellites": [],
     },
     "wake": {
         # Built-in name, or a path to a custom model such as

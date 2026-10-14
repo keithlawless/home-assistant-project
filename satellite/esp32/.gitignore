@@ -1,0 +1,6 @@
+main/secrets.h
+.pio/
+build/
+managed_components/
+sdkconfig*
+!sdkconfig.defaults

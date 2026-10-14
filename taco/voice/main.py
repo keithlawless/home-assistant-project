@@ -5,6 +5,10 @@ wake word -> chime -> record -> STT -> fast path or Hermes (streamed) -> TTS -> 
 With an echo-cancelling speakerphone ([audio] barge_in = true), the wake
 word is also watched while Taco speaks, so "Hey Taco" interrupts an answer.
 Without one, the loop is half-duplex: the mic is ignored while Taco speaks.
+
+Mic satellites in other rooms ([[audio.satellites]]) are listened to at the
+same time, each with its own wake word model; whichever mic hears the wake
+word handles that turn. Replies always play on the local speaker.
 """
 
 from __future__ import annotations
@@ -21,7 +25,7 @@ from taco.config import load_config, read_env_value
 from taco.voices import DEFAULT_VOICE, PREVIEW_TEXT
 
 from .alarm import AlarmPlayer
-from .audio import Microphone, Speaker, tone
+from .audio import Microphone, NetworkMicrophone, Speaker, tone
 from .core_link import CoreLink
 from .hermes import HermesClient
 from .listen import record_request
@@ -64,7 +68,8 @@ class Events:
 
 class BargeIn:
     """While Taco speaks, watch the mic for the wake word and cut the reply
-    short when it's heard. A no-op without echo cancellation."""
+    short when it's heard. A no-op without echo cancellation, and for turns
+    started from a satellite, whose mic has none."""
 
     def __init__(self, loop: VoiceLoop):
         self.loop = loop
@@ -73,11 +78,12 @@ class BargeIn:
         self._thread: threading.Thread | None = None
 
     def __enter__(self) -> BargeIn:
-        if self.loop.cfg["audio"]["barge_in"]:
-            self.loop.mic.flush()
+        if self.loop.cfg["audio"]["barge_in"] and self.loop.active is self.loop.listeners[0]:
+            self.mic, self.wake = self.loop.active
+            self.mic.flush()
             # The model's rolling window still holds the "Hey Taco" that started
             # this turn; without a reset it re-fires instantly.
-            self.loop.wake.reset()
+            self.wake.reset()
             self._thread = threading.Thread(target=self._watch, daemon=True, name="barge-in")
             self._thread.start()
         return self
@@ -85,10 +91,10 @@ class BargeIn:
     def _watch(self) -> None:
         while not self._done.is_set():
             try:
-                frame = self.loop.mic.read(timeout=0.1)
+                frame = self.mic.read(timeout=0.1)
             except queue.Empty:
                 continue
-            if (score := self.loop.wake.detect(frame)) is not None:
+            if (score := self.wake.detect(frame)) is not None:
                 log.info("barge-in (%.2f)", score)
                 self.heard = True
                 self.loop.cancel.set()
@@ -101,16 +107,23 @@ class BargeIn:
         if self._thread:
             self._thread.join()
         if self.heard:
-            self.loop.wake.reset()
+            self.wake.reset()
 
 
 class VoiceLoop:
     def __init__(self, cfg: dict):
         self.cfg = cfg
         audio = cfg["audio"]
-        self.mic = Microphone(audio["sample_rate"], audio["input_device"])
+        self.ready = threading.Event()   # any mic has a new frame
+        mics = [Microphone(audio["sample_rate"], audio["input_device"], audio["input_name"], self.ready)]
+        mics += [
+            NetworkMicrophone(s["name"], s["port"], s["token"], s.get("allow"), ready=self.ready)
+            for s in audio["satellites"]
+        ]
+        # openWakeWord keeps a rolling window per stream, so one model per mic.
+        self.listeners = [(mic, WakeWord(cfg["wake"]["model"], cfg["wake"]["threshold"])) for mic in mics]
+        self.active = self.listeners[0]   # the (mic, wake) handling the current turn
         self.speaker = Speaker(audio["output_device"])
-        self.wake = WakeWord(cfg["wake"]["model"], cfg["wake"]["threshold"])
         self.stt = Transcriber(cfg["stt"]["model"], cfg["stt"]["compute_type"])
         self.engines = EngineCache()
         self._tts_lock = threading.Lock()
@@ -159,8 +172,9 @@ class VoiceLoop:
             self.muted = muted
             log.info("microphone %s", "muted" if muted else "listening")
         threshold = WAKE_THRESHOLDS.get(settings.get("wake_sensitivity", "medium"))
-        if threshold and threshold != self.wake.threshold:
-            self.wake.threshold = threshold
+        if threshold and threshold != self.listeners[0][1].threshold:
+            for _, wake in self.listeners:
+                wake.threshold = threshold
             log.info("wake threshold %.2f", threshold)
         voice = settings.get("voice") or DEFAULT_VOICE
         if voice != self.voice_id:
@@ -201,25 +215,56 @@ class VoiceLoop:
     # -- main loop -----------------------------------------------------------------
 
     def run(self) -> None:
-        self.mic.start()
+        for mic, _ in self.listeners:
+            try:
+                mic.start()
+            except OSError:
+                log.exception("mic %r failed to start", mic.name)
         self._render_ack()   # also warms up the TTS graph
-        log.info("listening for wake word (barge-in %s)", "on" if self.cfg["audio"]["barge_in"] else "off")
+        log.info("listening for wake word on %s (barge-in %s)",
+                 ", ".join(mic.name for mic, _ in self.listeners),
+                 "on" if self.cfg["audio"]["barge_in"] else "off")
         self.events.send("state", state="idle")
         while True:
-            frame = self.mic.read()
-            if self.muted:
-                continue   # frames are still drained so unmuting starts fresh
-            if (score := self.wake.detect(frame)) is not None:
-                log.info("wake word (%.2f)", score)
-                self.wake.reset()
-                if self.alarm.active:
-                    # Like a smart speaker: saying the name silences the alarm.
-                    self.alarm.silence()
-                    self.core.stop_ringing()
-                self.converse()
-                self.wake.reset()
-                self.mic.flush()
-                self.events.send("state", state="idle")
+            self.ready.wait()
+            self.ready.clear()   # before draining, so a frame arriving mid-drain re-sets it
+            if (heard := self._detect_wake()) is None:
+                continue
+            score, self.active = heard
+            log.info("wake word (%.2f, %s)", score, self.active[0].name)
+            self._reset_wake()
+            if self.alarm.active:
+                # Like a smart speaker: saying the name silences the alarm.
+                self.alarm.silence()
+                self.core.stop_ringing()
+            self.converse()
+            self._reset_wake()
+            self.flush_mics()
+            self.events.send("state", state="idle")
+
+    def _detect_wake(self):
+        """Feed every mic's buffered frames to its wake model. Returns
+        (score, (mic, wake)) for the strongest detection, or None."""
+        best = None
+        for mic, wake in self.listeners:
+            while (frame := mic.read_nowait()) is not None:
+                if self.muted:
+                    continue   # frames are still drained so unmuting starts fresh
+                if (score := wake.detect(frame)) is not None:
+                    if best is None or score > best[0]:
+                        best = (score, (mic, wake))
+                    break   # leave the rest of this mic's audio for the request
+        return best
+
+    def _reset_wake(self) -> None:
+        for _, wake in self.listeners:
+            wake.reset()
+
+    def flush_mics(self) -> None:
+        """Drop buffered audio on every mic, e.g. Taco's own voice, which
+        satellites in other rooms hear too."""
+        for mic, _ in self.listeners:
+            mic.flush()
 
     def converse(self) -> None:
         """One wake: a request, plus follow-ups while Taco keeps asking questions
@@ -229,7 +274,7 @@ class VoiceLoop:
             self._play_and_wait(WAKE_CHIME, 22050)
             self.events.send("state", state="listening")
             audio = record_request(
-                self.mic,
+                self.active[0],
                 start_timeout_s=start_timeout,
                 end_silence_s=self.cfg["listen"]["end_silence_s"],
                 max_seconds=self.cfg["listen"]["max_seconds"],
@@ -276,7 +321,7 @@ class VoiceLoop:
         with BargeIn(self) as barge:
             self.speaker.play(*self.synthesize(text))
             self.speaker.wait()
-        self.mic.flush()
+        self.flush_mics()
         return ("" if self.cancel.is_set() else text), barge.heard
 
     def respond(self, text: str, t0: float) -> tuple[str, bool]:
@@ -306,7 +351,7 @@ class VoiceLoop:
                     self.speaker.play(*self.synthesize(ERROR_REPLY))
                     spoken = [ERROR_REPLY]
             self.speaker.wait()
-        self.mic.flush()  # discard Taco's own voice picked up by the mic
+        self.flush_mics()  # discard Taco's own voice picked up by the mics
         log.info("reply done in %.2fs: %r", time.monotonic() - t0, " ".join(spoken))
         # A cancelled reply never invites a follow-up question.
         return ("" if self.cancel.is_set() else " ".join(spoken)), barge.heard
@@ -314,7 +359,7 @@ class VoiceLoop:
     def _play_and_wait(self, audio, rate) -> None:
         self.speaker.play(audio, rate)
         self.speaker.wait()
-        self.mic.flush()
+        self.flush_mics()
 
 
 def main() -> None:

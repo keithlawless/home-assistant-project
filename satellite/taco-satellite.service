@@ -1,0 +1,16 @@
+[Unit]
+Description=Taco mic satellite (streams this room's mic to Taco)
+After=network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/bin/python3 /usr/local/bin/taco_satellite.py
+Restart=always
+RestartSec=3
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/etc/taco-satellite.conf
+SupplementalGroups=audio
+DynamicUser=yes
+
+[Install]
+WantedBy=multi-user.target
