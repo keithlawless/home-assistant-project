@@ -1,4 +1,4 @@
-from taco.voice.hermes import clean_for_speech, split_sentences
+from taco.voice.hermes import asks_question, clean_for_speech, split_sentences
 
 
 def test_split_keeps_remainder():
@@ -20,3 +20,11 @@ def test_no_boundary_returns_nothing():
 def test_clean_markdown():
     text = "**Basil** is [great](https://x.com) with `tomatoes`.\n- Oregano too"
     assert clean_for_speech(text) == "Basil is great with tomatoes. Oregano too"
+
+
+def test_asks_question():
+    assert asks_question("Which city did you mean?")
+    assert asks_question("I couldn't get that forecast. Which state is it in? I'll try again with that.")
+    assert not asks_question("Why not? Tomatoes like heat. Water them daily.")
+    assert not asks_question("It's 57 degrees.")
+    assert not asks_question("")

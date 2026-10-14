@@ -27,7 +27,7 @@ from taco.voices import DEFAULT_VOICE, PREVIEW_TEXT
 from .alarm import AlarmPlayer
 from .audio import Microphone, NetworkMicrophone, Speaker, tone
 from .core_link import CoreLink
-from .hermes import HermesClient
+from .hermes import HermesClient, asks_question
 from .listen import record_request
 from .stt import Transcriber
 from .tts import EngineCache
@@ -306,8 +306,8 @@ class VoiceLoop:
             if barged:
                 start_timeout = self.cfg["listen"]["start_timeout_s"]
                 continue  # "Hey Taco" mid-answer: listen for the new request
-            # A reply that ends in a question gets a follow-up turn, no wake word.
-            if not reply.rstrip().endswith("?"):
+            # A reply that asks a question gets a follow-up turn, no wake word.
+            if not asks_question(reply):
                 return
             start_timeout = self.cfg["listen"]["followup_s"]
 

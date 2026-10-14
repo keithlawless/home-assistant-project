@@ -52,6 +52,13 @@ def split_sentences(buffer: str) -> tuple[list[str], str]:
     return complete, remainder
 
 
+def asks_question(reply: str) -> bool:
+    """True if a reply is waiting on the user: one of its last two sentences
+    is a question. Replies often add a line after the question ("Which state
+    is that in? I'll try again with that."), so the final "?" isn't enough."""
+    return any(s.endswith("?") for s in _SENTENCE_END.split(reply.strip())[-2:])
+
+
 class HermesClient:
     def __init__(self, url: str, api_key: str | None, model: str = "hermes",
                  timeout_s: float = 60.0, history_ttl_s: float = 120.0):
