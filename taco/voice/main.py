@@ -29,7 +29,7 @@ from .audio import Microphone, NetworkMicrophone, Speaker, tone
 from .core_link import CoreLink
 from .hermes import HermesClient, asks_question
 from .listen import record_request
-from .stt import Transcriber
+from .stt import Transcriber, build_vocabulary
 from .tts import EngineCache
 from .wake import WakeWord
 
@@ -124,7 +124,8 @@ class VoiceLoop:
         self.listeners = [(mic, WakeWord(cfg["wake"]["model"], cfg["wake"]["threshold"])) for mic in mics]
         self.active = self.listeners[0]   # the (mic, wake) handling the current turn
         self.speaker = Speaker(audio["output_device"])
-        self.stt = Transcriber(cfg["stt"]["model"], cfg["stt"]["compute_type"])
+        self.stt = Transcriber(cfg["stt"]["model"], cfg["stt"]["compute_type"],
+                               build_vocabulary(None, cfg["stt"]["vocabulary"]))
         self.engines = EngineCache()
         self._tts_lock = threading.Lock()
         self.voice_id = f"{cfg['tts']['engine']}:{cfg['tts']['voice']}"
@@ -176,6 +177,7 @@ class VoiceLoop:
             for _, wake in self.listeners:
                 wake.threshold = threshold
             log.info("wake threshold %.2f", threshold)
+        self.stt.set_vocabulary(build_vocabulary(settings.get("location"), self.cfg["stt"]["vocabulary"]))
         voice = settings.get("voice") or DEFAULT_VOICE
         if voice != self.voice_id:
             threading.Thread(target=self.set_voice, args=(voice,), daemon=True, name="voice-load").start()

@@ -82,6 +82,7 @@ Runtime data lives on the SSD under `/srv/taco/`: the DB, models, voices, logs a
 
 ### 2. Speech-to-text
 - **faster-whisper `base.en` int8** runs locally on the Pi, with Silero VAD to detect the end of speech.
+- **Local names:** Whisper spells unfamiliar place names phonetically ("North Poro"). The home town from Settings plus `[stt] vocabulary` in `/srv/taco/config.toml` (nearby towns, streets) are passed as hotwords and in the initial prompt.
 - Optional cloud fallback is Groq Whisper. It isn't LLM inference, but it is off by default to keep everything local.
 
 ### 3. Text-to-speech (voice options)

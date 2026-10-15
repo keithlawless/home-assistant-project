@@ -50,6 +50,9 @@ DEFAULTS: dict = {
     "stt": {
         "model": "base.en",
         "compute_type": "int8",
+        # Local names Whisper should expect (nearby towns, streets). The home
+        # town from Settings is added automatically.
+        "vocabulary": [],
     },
     "tts": {
         # Starting voice; the Settings screen (or "change your voice") overrides it.
