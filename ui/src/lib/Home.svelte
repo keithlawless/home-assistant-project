@@ -4,6 +4,7 @@
   import WeatherIcon from './WeatherIcon.svelte';
   import TimerChips from './TimerChips.svelte';
   import MediaChip from './MediaChip.svelte';
+  import Notifications from './Notifications.svelte';
   import { weather, settings, alerts } from './store.js';
   import { now, formatTime, ampm, formatDate, hourLabel, dayLabel } from './time.js';
 
@@ -73,9 +74,13 @@
     </div>
   </section>
 
-  <div class="chip-row">
-    <MediaChip />
-    <TimerChips />
+  <!-- The empty band above the forecast: chips, then notification cards. -->
+  <div class="band">
+    <div class="chip-row">
+      <MediaChip />
+      <TimerChips />
+    </div>
+    <div class="cards"><Notifications /></div>
   </div>
 
   {#if w}
@@ -112,7 +117,9 @@
     gap: 12px;
   }
   .top { display: flex; justify-content: space-between; }
+  .band { display: flex; flex-direction: column; gap: 8px; min-height: 0; }
   .chip-row { display: flex; gap: 10px; overflow: hidden; }
+  .cards { position: relative; }
   .chip-row:empty { display: none; }
   .alert {
     display: flex; align-items: center; gap: 10px;

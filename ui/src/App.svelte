@@ -10,7 +10,6 @@
   import VoiceOverlay from './lib/VoiceOverlay.svelte';
   import Ringing from './lib/Ringing.svelte';
   import Recipe from './lib/Recipe.svelte';
-  import Notifications from './lib/Notifications.svelte';
   import { connect, connected, settings, timers, voiceEvents, screenMode, saveSettings, recipe,
            notificationWake } from './lib/store.js';
 
@@ -157,7 +156,6 @@
   {/if}
   <Recipe />
   <VoiceOverlay />
-  <Notifications />
   {#if $settings?.mic_muted}
     <button class="mic-off" onclick={() => saveSettings({ mic_muted: false })}>
       <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2"
