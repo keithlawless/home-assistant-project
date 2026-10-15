@@ -87,6 +87,17 @@ DEFAULTS: dict = {
         # Webhook notifications still wake the screen but don't chime.
         "quiet_hours": {"start": "22:00", "end": "06:00"},
     },
+    "health": {
+        # Pi health cards: CPU (averaged over window_s), memory, temperature.
+        # Each clears clear_margin below its limit. Throttling and
+        # under-voltage always raise a card.
+        "cpu_percent": 75,
+        "memory_percent": 75,
+        "temp_c": 75,              # Pi 5 soft-throttles at 80 °C
+        "clear_margin": 5,
+        "window_s": 120,
+        "interval_s": 10,
+    },
     "webhooks": {
         # Outside senders allowed to post notifications through the Cloudflare
         # tunnel (deploy/cloudflared/README.md). Empty = webhook off. e.g.

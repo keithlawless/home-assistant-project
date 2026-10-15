@@ -31,6 +31,7 @@ from .devices.base import DeviceError
 from .devices.kasa import KasaDriver
 from .devices.manager import DeviceManager, Registry
 from .devices.matter import MatterDriver
+from .health import HealthMonitor, Limits, card, evaluate
 from .hub import Hub
 from .intents import normalize, parse_clock
 from .lists import ListStore
@@ -72,6 +73,9 @@ class State:
         self.scenes = SceneStore(self.db.conn, self.db.lock)
         self.notifications = NotificationStore(self.db.conn, self.db.lock)
         self.webhook = WebhookGuard(self.cfg["webhooks"]["senders"])
+        h = self.cfg["health"]
+        self.health = HealthMonitor(Limits(h["cpu_percent"], h["memory_percent"], h["temp_c"], h["clear_margin"]),
+                                    window_s=h["window_s"], interval_s=h["interval_s"])
         self.media = RadioPlayer(self.cfg["audio"]["output_device"], on_change=self.broadcast_media)
         self.spotify = SpotifyState()
         self.recipe: dict[str, Any] | None = None
@@ -149,6 +153,27 @@ class State:
     def quiet_now(self) -> bool:
         q = self.cfg["notifications"]["quiet_hours"]
         return bool(q) and in_window(datetime.now(), q["start"], q["end"])
+
+    async def health_loop(self) -> None:
+        """One card per problem. It updates in place if the problem comes back
+        before it's dismissed, and says "back to normal" when it clears."""
+        while True:
+            try:
+                readings = await self.health.sample()
+                start, end = evaluate(readings, self.health.active, self.health.limits)
+                for name in start:
+                    self.health.active.add(name)
+                    title, body = card(name, readings)
+                    log.warning("health: %s", title)
+                    await self.notify("health", title, body, key=f"health:{name}", merge_s=None)
+                for name in end:
+                    self.health.active.discard(name)
+                    log.info("health: %s back to normal", name)
+                    if self.notifications.resolve(f"health:{name}"):
+                        await self.broadcast_notifications()
+            except Exception:
+                log.exception("health check failed")
+            await asyncio.sleep(self.health.interval_s)
 
     def events_on(self, day) -> list[dict[str, Any]]:
         return [e for e in self.events if e["date"] == day.isoformat()]
@@ -305,7 +330,8 @@ async def lifespan(app: FastAPI):
     state = State()
     tasks = [asyncio.create_task(c) for c in (
         state.weather_loop(), state.timer_loop(), state.matter.run(), state.devices.poll_loop(),
-        state.scheduler.loop(), state.alerts_loop(), state.calendar_loop())]
+        state.scheduler.loop(), state.alerts_loop(), state.calendar_loop(),
+        state.health_loop())]
     yield
     for task in tasks:
         task.cancel()
@@ -715,6 +741,12 @@ async def calendar(days: int = 1) -> list[dict[str, Any]]:
 @app.get("/api/alerts")
 async def get_alerts() -> list[dict[str, Any]]:
     return state.alerts
+
+
+@app.get("/api/health")
+async def health() -> dict[str, Any]:
+    """Latest Pi readings (CPU is the window average; None until the window fills)."""
+    return state.health.latest
 
 
 @app.post("/api/announce")
