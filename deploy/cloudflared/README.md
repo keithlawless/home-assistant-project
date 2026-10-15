@@ -79,11 +79,20 @@ the fields as query parameters instead.
 | `chime` | Default true: play a chime. Always silent in quiet hours (22:00–06:00, `[notifications] quiet_hours`). |
 
 ### Blink motion through Alexa
-In the Alexa app, create a routine. Set **When this happens** to Smart Home → your Blink camera → motion. Alexa
-routines have no built-in "open a URL" action, so the action has to go through a
-bridge that can make a web request, such as a webhook-capable Alexa skill or IFTTT. Have it
-request:
-```
-https://taco-hook.example.com/hook/notify/<secret>?kind=camera&title=Motion:%20front%20door&key=front%20door
-```
-Make one routine per camera, each with its own title and key.
+Alexa routines have no built-in "open a URL" action. The bridge in use is the
+**Virtual Smart Home** Alexa skill: each **URL Switch** you create there is a
+virtual Alexa device that requests a URL when it's turned on.
+
+1. In Virtual Smart Home, create one URL Switch per alert, with its ON URL set to e.g.
+   ```
+   https://taco-hook.example.com/hook/notify/<secret>?kind=camera&title=Motion:%20front%20door&key=front%20door
+   ```
+2. In the Alexa app, create a routine. Set **When this happens** to Smart Home →
+   the Blink camera → motion, and the action to turn that URL Switch on.
+
+Make one switch and routine per camera or event, each with its own title and key.
+
+IFTTT was tried first and dropped: its Blink "Motion detected" trigger gives
+only the camera name and time (no AI description), and with Blink's newer plans
+that merge several cameras into one event it reported every event as a single
+camera.
