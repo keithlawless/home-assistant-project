@@ -10,7 +10,9 @@
   import VoiceOverlay from './lib/VoiceOverlay.svelte';
   import Ringing from './lib/Ringing.svelte';
   import Recipe from './lib/Recipe.svelte';
-  import { connect, connected, settings, timers, voiceEvents, screenMode, saveSettings, recipe } from './lib/store.js';
+  import Notifications from './lib/Notifications.svelte';
+  import { connect, connected, settings, timers, voiceEvents, screenMode, saveSettings, recipe,
+           notificationWake } from './lib/store.js';
 
   const SHIFT_EVERY_MS = 3 * 60_000;
   const SHIFT_PX = 4;
@@ -82,6 +84,16 @@
     }
   });
 
+  // A notification that asks to be seen (camera motion) wakes the screen,
+  // even from night mode.
+  $effect(() => {
+    if ($notificationWake) {
+      activity();
+      saverOn = false;
+      setNight(false);
+    }
+  });
+
   // Voice activity counts as use: wake the screen when Taco hears its name.
   $effect(() => {
     const e = $voiceEvents;
@@ -145,6 +157,7 @@
   {/if}
   <Recipe />
   <VoiceOverlay />
+  <Notifications />
   {#if $settings?.mic_muted}
     <button class="mic-off" onclick={() => saveSettings({ mic_muted: false })}>
       <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2"

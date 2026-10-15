@@ -32,6 +32,11 @@ cp deploy/systemd/*.service ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now taco-core.service taco-voice.service taco-spotify.service
 systemctl --user restart taco-core.service taco-voice.service taco-spotify.service hermes-gateway.service
+# Notification webhook tunnel, once it's set up (deploy/cloudflared/README.md).
+if [[ -f ~/.cloudflared/config.yml ]]; then
+  systemctl --user enable --now taco-tunnel.service
+  systemctl --user restart taco-tunnel.service
+fi
 
 # Kiosk: boot straight into the Taco UI.
 mkdir -p ~/.config/labwc

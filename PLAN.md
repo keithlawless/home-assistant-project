@@ -126,6 +126,7 @@ A common `TTSEngine` interface streams sentence by sentence, so speech starts be
 - **Home (default):** large current weather (temp, condition icon, feels-like, hi/lo), hourly strip, 5-day forecast, clock and date. Active timers are pinned as countdown chips.
 - **Other screens:** Devices (room tiles with toggles and dimmers), Timers, Lists, Now Playing, Settings (voice, wake sensitivity, location, screensaver timeout, night mode).
 - **Conversation overlay:** live transcript plus Taco's reply card, which auto-dismisses back to Home.
+- **Notifications:** cards stacked top right that stay until dismissed (× or "Dismiss all"); repeats of the same event merge ("×3"). Sources: the Pi health monitor, local scripts (`POST /api/notifications`), and outside senders through the webhook `/hook/notify`, which is reached over a Cloudflare tunnel that exposes only that path and is protected by per-sender shared secrets, IP lockout and rate limits (`deploy/cloudflared/README.md`). First outside sender: Blink motion via an Alexa routine. Webhook cards wake the screen and chime, except in quiet hours (22:00–06:00), when they wake the screen silently.
 - **Screensaver / burn-in protection:**
   - After N minutes idle (default 5), switch to a near-black screen with a dim clock that drifts slowly. An optional photo-frame mode crossfades photos from `/srv/taco/photos`.
   - All static UI elements also get a ±few-pixel periodic shift.

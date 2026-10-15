@@ -1,0 +1,13 @@
+# Cloudflare tunnel for Taco's notification webhook (see README.md here).
+# Copy to ~/.cloudflared/config.yml on the Pi and fill in the two placeholders.
+tunnel: <TUNNEL-ID>
+credentials-file: /home/taco/.cloudflared/<TUNNEL-ID>.json
+
+ingress:
+  # Only the webhook is reachable from the internet; it still needs a
+  # sender's secret ([[webhooks.senders]] in /srv/taco/config.toml).
+  - hostname: <taco.example.com>
+    path: ^/hook/notify(/|$)
+    service: http://127.0.0.1:8700
+  # Everything else (the UI, /api, /ws) stays on the LAN.
+  - service: http_status:404

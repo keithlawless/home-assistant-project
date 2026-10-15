@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 
 from taco.config import load_config
@@ -35,9 +35,11 @@ from .hub import Hub
 from .intents import normalize, parse_clock
 from .lists import ListStore
 from .media import RadioPlayer, SpotifyState, search_stations
+from .notifications import NotificationStore, in_window
 from .scenes import SceneStore, scene_key
 from .scheduler import Scheduler, ScheduleStore, describe
 from .weather import fetch_forecast, geocode, locate_by_ip
+from .webhook import MAX_BODY_BYTES, Rejected, WebhookGuard, parse_payload
 
 log = logging.getLogger("taco.core")
 
@@ -68,6 +70,8 @@ class State:
         self._last_devices = ""
         self.lists = ListStore(self.db.conn, self.db.lock)
         self.scenes = SceneStore(self.db.conn, self.db.lock)
+        self.notifications = NotificationStore(self.db.conn, self.db.lock)
+        self.webhook = WebhookGuard(self.cfg["webhooks"]["senders"])
         self.media = RadioPlayer(self.cfg["audio"]["output_device"], on_change=self.broadcast_media)
         self.spotify = SpotifyState()
         self.recipe: dict[str, Any] | None = None
@@ -124,6 +128,27 @@ class State:
     async def announce(self, text: str) -> None:
         """Have taco-voice chime and speak `text` (alerts, scheduled reminders)."""
         await self.hub.broadcast({"type": "announce", "text": text})
+
+    async def notify(self, kind: str, title: str, body: str = "", *, key: str | None = None,
+                     sender: str | None = None, wake: bool = False, chime: bool = False,
+                     merge_s: float | None = 120.0) -> dict[str, Any]:
+        """Put a card on screen. `wake` lights the screen (even from night
+        mode); `chime` has taco-voice play the announcement chime."""
+        card = self.notifications.add(kind, title, body, key=key, sender=sender, merge_s=merge_s)
+        await self.broadcast_notifications(wake=wake)
+        if chime:
+            await self.hub.broadcast({"type": "notification_chime"})
+        if wake:
+            await self.set_screen("on", broadcast=False)   # powers the panel back up
+        return card
+
+    async def broadcast_notifications(self, wake: bool = False) -> None:
+        await self.hub.broadcast({"type": "notifications", "notifications": self.notifications.active(),
+                                  "wake": wake})
+
+    def quiet_now(self) -> bool:
+        q = self.cfg["notifications"]["quiet_hours"]
+        return bool(q) and in_window(datetime.now(), q["start"], q["end"])
 
     def events_on(self, day) -> list[dict[str, Any]]:
         return [e for e in self.events if e["date"] == day.isoformat()]
@@ -234,6 +259,7 @@ class State:
                 "found": self.devices.found_payload(), "lists": self.lists_payload(),
                 "scenes": self.scenes.all(), "schedules": self.schedules_payload(), "alerts": self.alerts,
                 "media": self.media_status(), "recipe": self.recipe,
+                "notifications": self.notifications.active(),
                 "events": self.events_on(datetime.now().date())}
 
     async def broadcast_timers(self) -> None:
@@ -697,6 +723,69 @@ async def announce(body: dict[str, Any]) -> dict[str, bool]:
     if not str(body.get("text", "")).strip():
         raise HTTPException(400, "nothing to say")
     await state.announce(str(body["text"]))
+    return {"ok": True}
+
+
+# --- notifications -------------------------------------------------------------
+
+@app.get("/api/notifications")
+async def list_notifications() -> list[dict[str, Any]]:
+    return state.notifications.active()
+
+
+@app.post("/api/notifications")
+async def add_notification(body: dict[str, Any]) -> dict[str, Any]:
+    """Local senders (scripts, Hermes): {"title", "body"?, "kind"?, "key"?, "wake"?, "chime"?}."""
+    try:
+        n = parse_payload(body)
+    except Rejected:
+        raise HTTPException(400, "a notification needs a title") from None
+    return await state.notify(n["kind"], n["title"], n["body"], key=n["key"], wake=n["wake"], chime=n["chime"])
+
+
+@app.delete("/api/notifications/{card_id}")
+async def dismiss_notification(card_id: int) -> dict[str, bool]:
+    state.notifications.dismiss(card_id)
+    await state.broadcast_notifications()
+    return {"ok": True}
+
+
+@app.delete("/api/notifications")
+async def dismiss_all_notifications() -> dict[str, int]:
+    removed = state.notifications.dismiss_all()
+    await state.broadcast_notifications()
+    return {"removed": removed}
+
+
+@app.api_route("/hook/notify", methods=["GET", "POST"])
+@app.api_route("/hook/notify/{token}", methods=["GET", "POST"])
+async def webhook_notify(request: Request, token: str | None = None) -> dict[str, bool]:
+    """Notifications from outside senders through the Cloudflare tunnel (webhook.py).
+    The secret goes in X-Taco-Token, or in the path for senders that can't set
+    headers. Fields come from the JSON body or, for a GET, the query string."""
+    ip = request.headers.get("cf-connecting-ip") or (request.client.host if request.client else "?")
+    try:
+        sender = state.webhook.check(ip, request.headers.get("x-taco-token") or token)
+        data: dict[str, Any] = dict(request.query_params)
+        if request.method == "POST":
+            raw = await request.body()
+            if len(raw) > MAX_BODY_BYTES:
+                raise Rejected(413)
+            if raw:
+                try:
+                    posted = json.loads(raw)
+                except ValueError:
+                    raise Rejected(400) from None
+                if not isinstance(posted, dict):
+                    raise Rejected(400)
+                data.update(posted)
+        n = parse_payload(data)
+    except Rejected as r:
+        raise HTTPException(r.status, "Not Found" if r.status == 404 else None) from None
+    log.info("webhook notification from %s: %r", sender, n["title"])
+    await state.notify(n["kind"], n["title"], n["body"], sender=sender,
+                       key=f"{sender}:{n['key']}" if n["key"] else None,
+                       wake=n["wake"], chime=n["chime"] and not state.quiet_now())
     return {"ok": True}
 
 

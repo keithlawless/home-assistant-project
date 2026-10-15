@@ -201,6 +201,8 @@ class VoiceLoop:
         kind = msg.get("type")
         if kind == "announce" and msg.get("text"):
             threading.Thread(target=self._announce, args=(msg["text"],), daemon=True).start()
+        if kind == "notification_chime":
+            self.announcer.play(ANNOUNCE_CHIME, 22050)
         if kind in ("timers", "snapshot"):
             self.alarm.update(msg.get("timers") or [])
         if kind in ("settings", "snapshot") and msg.get("settings"):

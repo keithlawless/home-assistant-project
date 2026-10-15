@@ -83,6 +83,18 @@ DEFAULTS: dict = {
         # Private iCal addresses (secret; keep them in /srv/taco/config.toml only).
         "ical_urls": [],
     },
+    "notifications": {
+        # Webhook notifications still wake the screen but don't chime.
+        "quiet_hours": {"start": "22:00", "end": "06:00"},
+    },
+    "webhooks": {
+        # Outside senders allowed to post notifications through the Cloudflare
+        # tunnel (deploy/cloudflared/README.md). Empty = webhook off. e.g.
+        #   [[webhooks.senders]]
+        #   name  = "alexa"
+        #   token = "..."   # openssl rand -hex 24; keep it out of the repo
+        "senders": [],
+    },
     "matter": {
         "url": "ws://127.0.0.1:5580/ws",
         # Needed only to set up brand-new Matter devices over Bluetooth.

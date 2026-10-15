@@ -1,0 +1,11 @@
+[Unit]
+Description=Taco Cloudflare tunnel (notification webhook only)
+After=network-online.target taco-core.service
+
+[Service]
+ExecStart=/usr/bin/cloudflared tunnel --no-autoupdate --config %h/.cloudflared/config.yml run
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target

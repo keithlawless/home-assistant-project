@@ -13,6 +13,9 @@ export const schedules = writable([]);
 export const alerts = writable([]);
 export const media = writable(null);    // {station} while the radio plays
 export const recipe = writable(null);   // {title, ingredients, steps, step}
+export const notifications = writable([]);   // cards, newest first
+// Bumped when a new card should wake the screen (camera motion etc.).
+export const notificationWake = writable(0);
 // Screen mode pushed by core: 'night' (black until touched) or 'on'.
 export const screenMode = writable('on');
 // Each voice event from taco-voice: {type: 'state'|'heard'|'tool'|'reply', ...}
@@ -32,6 +35,11 @@ function handle(msg) {
       alerts.set(msg.alerts ?? []);
       media.set(msg.media ?? null);
       recipe.set(msg.recipe ?? null);
+      notifications.set(msg.notifications ?? []);
+      break;
+    case 'notifications':
+      notifications.set(msg.notifications);
+      if (msg.wake) notificationWake.update((n) => n + 1);
       break;
     case 'media':
       media.set(msg.media);
@@ -134,3 +142,5 @@ export const setScheduleEnabled = (id, enabled) => post(`/api/schedules/${id}`, 
 export const stopMedia = () => post('/api/media/stop');
 export const recipeStep = (delta) => post('/api/recipe/step', { delta });
 export const closeRecipe = () => post('/api/recipe', undefined, 'DELETE');
+export const dismissNotification = (id) => post(`/api/notifications/${id}`, undefined, 'DELETE');
+export const dismissAllNotifications = () => post('/api/notifications', undefined, 'DELETE');
