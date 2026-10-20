@@ -40,7 +40,7 @@ from .notifications import NotificationStore, in_window
 from .scenes import SceneStore, scene_key
 from .scheduler import Scheduler, ScheduleStore, describe
 from .weather import fetch_forecast, geocode, locate_by_ip
-from .webhook import MAX_BODY_BYTES, Rejected, WebhookGuard, parse_payload
+from .webhook import MAX_BODY_BYTES, Rejected, WebhookGuard, forward, parse_payload
 
 log = logging.getLogger("taco.core")
 
@@ -73,6 +73,7 @@ class State:
         self.scenes = SceneStore(self.db.conn, self.db.lock)
         self.notifications = NotificationStore(self.db.conn, self.db.lock)
         self.webhook = WebhookGuard(self.cfg["webhooks"]["senders"])
+        self._forwards: set[asyncio.Task] = set()   # keep in-flight forwards alive
         h = self.cfg["health"]
         self.health = HealthMonitor(Limits(h["cpu_percent"], h["memory_percent"], h["temp_c"], h["clear_margin"]),
                                     window_s=h["window_s"], interval_s=h["interval_s"])
@@ -818,6 +819,10 @@ async def webhook_notify(request: Request, token: str | None = None) -> dict[str
     await state.notify(n["kind"], n["title"], n["body"], sender=sender,
                        key=f"{sender}:{n['key']}" if n["key"] else None,
                        wake=n["wake"], chime=n["chime"] and not state.quiet_now())
+    # Pass it on to Chilli (Telegram) in the background; a slow or failed send never delays the hook.
+    task = asyncio.create_task(forward(state.http, state.cfg["notifications"].get("forward", {}), n, sender))
+    state._forwards.add(task)
+    task.add_done_callback(state._forwards.discard)
     return {"ok": True}
 
 

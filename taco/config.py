@@ -86,6 +86,9 @@ DEFAULTS: dict = {
     "notifications": {
         # Webhook notifications still wake the screen but don't chime.
         "quiet_hours": {"start": "22:00", "end": "06:00"},
+        # Also pass webhook notifications (not health cards) to Chilli, which
+        # sends them to Telegram. Empty url = off. Token: keep it out of the repo.
+        "forward": {"url": "", "token": ""},
     },
     "health": {
         # Pi health cards: CPU (averaged over window_s), memory, temperature.

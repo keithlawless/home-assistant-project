@@ -10,6 +10,13 @@ deploy/cloudflared/config.yml), and it needs a sender's shared secret:
 Wrong or missing secrets get the same 404 as a path that doesn't exist, an
 IP that keeps guessing is locked out, and each sender is rate limited so a
 leaked secret can't flood the screen.
+
+Accepted notifications can also be forwarded to another service on the LAN
+(Chilli, which passes them on to Telegram):
+
+    [notifications.forward]
+    url   = "http://192.168.4.105:8710/notify"
+    token = "..."     # the secret Chilli knows Taco by (X-Chilli-Token)
 """
 
 from __future__ import annotations
@@ -20,6 +27,8 @@ import re
 import time
 from collections import defaultdict, deque
 from typing import Any
+
+import httpx
 
 log = logging.getLogger(__name__)
 
@@ -71,6 +80,23 @@ def parse_payload(data: dict[str, Any]) -> dict[str, Any]:
         "wake": _flag(data.get("wake"), True),
         "chime": _flag(data.get("chime"), True),
     }
+
+
+async def forward(http: httpx.AsyncClient, target: dict[str, Any], n: dict[str, Any], sender: str) -> bool:
+    """Pass an outside sender's notification on to target["url"]. Best effort:
+    a failure is logged and never raised, so the webhook still answers."""
+    url = target.get("url") or ""
+    if not url:
+        return False
+    payload = {"title": n["title"], "body": n["body"], "kind": n["kind"], "key": n["key"] or "",
+               "source": sender}
+    try:
+        r = await http.post(url, json=payload, headers={"X-Chilli-Token": str(target.get("token") or "")})
+        r.raise_for_status()
+        return True
+    except httpx.HTTPError as e:
+        log.warning("forwarding %r to %s failed: %s", n["title"], url, e)
+        return False
 
 
 class WebhookGuard:

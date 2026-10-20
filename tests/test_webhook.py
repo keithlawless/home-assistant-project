@@ -1,7 +1,11 @@
+import asyncio
+import json
+
+import httpx
 import pytest
 
 from taco.core import webhook as W
-from taco.core.webhook import Rejected, WebhookGuard, parse_payload
+from taco.core.webhook import Rejected, WebhookGuard, forward, parse_payload
 
 SECRET = "s3cret-token-of-enough-length"
 SENDERS = [{"name": "alexa", "token": SECRET}, {"name": "script", "token": "another-long-secret-123"}]
@@ -93,3 +97,48 @@ def test_payload_defaults_and_bad_kind():
 
 def test_payload_needs_title():
     assert status(lambda: parse_payload({"title": "  \x07 "})) == 400
+
+
+# --- forwarding to Chilli ------------------------------------------------------
+
+TARGET = {"url": "http://chilli.lan:8710/notify", "token": "chilli-secret-0123456789"}
+
+
+def run_forward(target, handler):
+    seen = []
+
+    def record(request):
+        seen.append(request)
+        return handler(request)
+
+    async def go():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(record)) as http:
+            n = parse_payload({"title": "Motion: front door", "kind": "camera", "key": "front door"})
+            return await forward(http, target, n, "alexa")
+
+    return asyncio.run(go()), seen
+
+
+def test_forward_posts_payload_with_token():
+    ok, seen = run_forward(TARGET, lambda r: httpx.Response(200, json={"ok": True}))
+    assert ok and len(seen) == 1
+    assert str(seen[0].url) == TARGET["url"]
+    assert seen[0].headers["x-chilli-token"] == TARGET["token"]
+    assert json.loads(seen[0].content) == {"title": "Motion: front door", "body": "", "kind": "camera",
+                                           "key": "front door", "source": "alexa"}
+
+
+def test_forward_off_without_url():
+    ok, seen = run_forward({"url": "", "token": ""}, lambda r: httpx.Response(200))
+    assert not ok and seen == []
+
+
+def test_forward_failure_is_swallowed():
+    ok, _ = run_forward(TARGET, lambda r: httpx.Response(404))
+    assert not ok
+
+    def boom(request):
+        raise httpx.ConnectError("unreachable", request=request)
+
+    ok, _ = run_forward(TARGET, boom)
+    assert not ok
