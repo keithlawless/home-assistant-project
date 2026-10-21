@@ -1,5 +1,6 @@
-"""Music: internet radio through mpv (stations from Radio Browser, a free
-community directory) and a Spotify Connect speaker (librespot, see
+"""Music: internet radio and songs from the NAS (library.py) through mpv
+(stations from Radio Browser, a free community directory), and a Spotify
+Connect speaker (librespot, see
 deploy/systemd/taco-spotify.service). Both are "ducked" to a low volume
 while Taco is listening or talking.
 
@@ -26,6 +27,7 @@ RADIO_BROWSERS = ["https://all.api.radio-browser.info/json", "https://de1.api.ra
                   "https://de2.api.radio-browser.info/json"]
 HEADERS = {"User-Agent": "Taco/0.1 (kitchen assistant)"}
 SOCKET = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "taco-mpv.sock")
+PLAYLIST = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "taco-playlist.m3u")
 DUCK_VOLUME = 20
 NORMAL_VOLUME = 100
 MUSIC_SINK = "taco_music"   # deploy/pipewire/60-taco-music.conf
@@ -100,12 +102,22 @@ class RadioPlayer:
         return {"station": self.station["name"]} if self.playing and self.station else None
 
     async def play(self, station: dict[str, Any]) -> None:
+        """`station` is a radio station {"name", "url"}, or songs from the
+        library {"name", "urls", "options"} (Library.station)."""
         await self.stop(notify=False)
         args = ["mpv", "--no-video", "--really-quiet", "--no-terminal", f"--input-ipc-server={SOCKET}",
-                f"--volume={DUCK_VOLUME if self._ducked else NORMAL_VOLUME}", "--cache=yes"]
+                f"--volume={DUCK_VOLUME if self._ducked else NORMAL_VOLUME}", "--cache=yes",
+                *station.get("options", [])]
         if self._device:
             args.append(f"--audio-device=pipewire/{self._device}")
-        self._proc = await asyncio.create_subprocess_exec(*args, station["url"],
+        if "urls" in station:
+            fd = os.open(PLAYLIST, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as f:
+                f.write("\n".join(station["urls"]) + "\n")
+            target = f"--playlist={PLAYLIST}"
+        else:
+            target = station["url"]
+        self._proc = await asyncio.create_subprocess_exec(*args, target,
                                                           stdout=asyncio.subprocess.DEVNULL,
                                                           stderr=asyncio.subprocess.DEVNULL)
         self.station = station
@@ -136,15 +148,34 @@ class RadioPlayer:
         if self.playing:
             await self._ipc({"command": ["set_property", "volume", DUCK_VOLUME if ducked else NORMAL_VOLUME]})
 
-    async def _ipc(self, message: dict[str, Any]) -> None:
+    async def skip(self, step: int) -> bool:
+        """Next (1) or previous (-1) song in a library playlist."""
+        if not (self.playing and self.station and "urls" in self.station):
+            return False
+        reply = await self._ipc({"command": ["playlist-next" if step > 0 else "playlist-prev"]})
+        return bool(reply) and reply.get("error") == "success"
+
+    async def now_playing(self) -> dict[str, str]:
+        """The current song's tags (title, artist, album) as mpv read them."""
+        reply = await self._ipc({"command": ["get_property", "metadata"]}) if self.playing else None
+        tags = {k.lower(): v for k, v in ((reply or {}).get("data") or {}).items()}
+        return {k: tags[k] for k in ("title", "artist", "album") if tags.get(k)}
+
+    async def _ipc(self, message: dict[str, Any]) -> dict[str, Any] | None:
         try:
             reader, writer = await asyncio.open_unix_connection(SOCKET)
-            writer.write((json.dumps(message) + "\n").encode())
+            writer.write((json.dumps({**message, "request_id": 1}) + "\n").encode())
             await writer.drain()
-            await asyncio.wait_for(reader.readline(), 2)
-            writer.close()
-        except (OSError, asyncio.TimeoutError) as e:
+            try:
+                while True:   # mpv also sends event lines to every client
+                    reply = json.loads(await asyncio.wait_for(reader.readline(), 2) or b"{}")
+                    if "request_id" in reply or not reply:
+                        return reply or None
+            finally:
+                writer.close()
+        except (OSError, ValueError, asyncio.TimeoutError) as e:
             log.debug("mpv ipc: %s", e)
+            return None
 
 
 class SpotifyState:

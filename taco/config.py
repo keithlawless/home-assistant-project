@@ -93,6 +93,17 @@ DEFAULTS: dict = {
         "host": "127.0.0.1",
         "port": 8700,
     },
+    "music": {
+        # The music collection on the NAS, over WebDAV (taco/core/library.py).
+        # Empty url = off. Keep user and password in /srv/taco/config.toml only.
+        "url": "",
+        "user": "",
+        "password": "",
+        "verify_tls": False,   # the NAS uses a self-signed certificate
+        "reindex_days": 7,     # also indexed at every taco-core start, and on "reindex music"
+        "workers": 6,
+        "db": str(TACO_HOME / "data" / "music.db"),
+    },
     "speakers": {
         # "Play on Sonos" lasts until "play here", this long with no music,
         # the speaker dropping off, or a taco-core restart.

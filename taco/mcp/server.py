@@ -19,7 +19,8 @@ CORE = os.environ.get("TACO_CORE_URL", "http://127.0.0.1:8700")
 mcp = MCPServer(
     "taco",
     instructions="Tools for the household's kitchen assistant: timers, alarms, reminders, "
-                 "local weather, and the home's smart plugs and lights.",
+                 "local weather, the home's smart plugs and lights, internet radio, and the "
+                 "household's own music collection.",
 )
 http = httpx.Client(base_url=CORE, timeout=10.0)
 
@@ -406,6 +407,30 @@ def stop_music() -> str:
     """Stop the radio."""
     _call("POST", "/api/media/stop")
     return "Stopped."
+
+
+# --- music library -------------------------------------------------------------
+
+@mcp.tool()
+def search_music(query: str) -> dict:
+    """Search the household's own music collection by artist, album or song
+    title. Prefer it over radio when someone names an artist, album or song."""
+    return _call("GET", "/api/music/search", params={"q": query})
+
+
+@mcp.tool()
+def play_music(artist: str | None = None, album: str | None = None, title: str | None = None) -> dict:
+    """Play from the music collection: an artist (shuffled), an album (in
+    order, optionally with its artist) or a song title (optionally with its
+    artist). Use names as search_music returned them."""
+    return _call("POST", "/api/music/play", json={"artist": artist, "album": album, "title": title})
+
+
+@mcp.tool()
+def reindex_music() -> dict:
+    """Re-scan the music collection in the background (new albums added to
+    the NAS). The current index keeps working meanwhile."""
+    return _call("POST", "/api/music/reindex")
 
 
 # --- speakers ------------------------------------------------------------------

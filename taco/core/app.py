@@ -34,6 +34,7 @@ from .devices.matter import MatterDriver
 from .health import HealthMonitor, Limits, card, evaluate
 from .hub import Hub
 from .intents import normalize, parse_clock
+from .library import Library, Plan
 from .lists import ListStore
 from .media import MUSIC_SINK, RadioPlayer, SpotifyState, search_stations
 from .notifications import NotificationStore, in_window
@@ -80,6 +81,7 @@ class State:
                                     window_s=h["window_s"], interval_s=h["interval_s"])
         self.media = RadioPlayer(MUSIC_SINK, on_change=self.broadcast_media)
         self.spotify = SpotifyState()
+        self.library = Library(self.cfg["music"])
         self.speakers = Speakers(self.cfg["speakers"]["idle_revert_min"] * 60,
                                  music_playing=lambda: self.music_playing, on_change=self.broadcast_media)
         self.recipe: dict[str, Any] | None = None
@@ -129,6 +131,11 @@ class State:
             await self.media.play(stations[0])
             return stations[0]
         return None
+
+    async def play_library(self, plan: Plan) -> None:
+        if self.spotify.playing:
+            await self.spotify.stop()
+        await self.media.play(self.library.station(plan))
 
     async def _vacation_power(self, ids: list[int], on: bool) -> None:
         await self.devices.control(ids, "power", on)
@@ -339,7 +346,7 @@ async def lifespan(app: FastAPI):
     tasks = [asyncio.create_task(c) for c in (
         state.weather_loop(), state.timer_loop(), state.matter.run(), state.devices.poll_loop(),
         state.scheduler.loop(), state.alerts_loop(), state.calendar_loop(),
-        state.health_loop(), state.speakers.watch())]
+        state.health_loop(), state.speakers.watch(), state.library.loop())]
     yield
     for task in tasks:
         task.cancel()
@@ -868,6 +875,49 @@ async def play_media(body: dict[str, Any]) -> dict[str, Any]:
 async def stop_media() -> dict[str, bool]:
     await state.stop_music()
     return {"ok": True}
+
+
+# --- music library on the NAS (taco/core/library.py) ------------------------------
+
+@app.get("/api/music/status")
+async def music_status() -> dict[str, Any]:
+    return state.library.status()
+
+
+@app.get("/api/music/search")
+async def music_search(q: str) -> dict[str, list]:
+    return await asyncio.to_thread(state.library.search, q)
+
+
+@app.post("/api/music/play")
+async def music_play(body: dict[str, Any]) -> dict[str, Any]:
+    """body: {"artist"?, "album"?, "title"?}: an artist plays shuffled, an album
+    in order, a title as one song."""
+    artist, album, title = body.get("artist"), body.get("album"), body.get("title")
+    lib = state.library
+    if title:
+        plan = await asyncio.to_thread(lib.resolve, title, artist, None)
+    elif album:
+        plan = await asyncio.to_thread(lib.resolve, album, artist, "album")
+    elif artist:
+        plan = await asyncio.to_thread(lib.resolve, artist, None, "artist")
+    else:
+        raise HTTPException(400, "give an artist, album or title")
+    if plan is None:
+        raise HTTPException(404, "not found in the music library; try search_music")
+    await state.play_library(plan)
+    return {"playing": plan.name, "kind": plan.kind, "songs": len(plan.paths)}
+
+
+@app.post("/api/music/reindex")
+async def music_reindex() -> dict[str, Any]:
+    """Start a re-index in the background; the current index stays in use."""
+    if not state.library.enabled:
+        raise HTTPException(503, "no music library configured")
+    started = not state.library.indexing
+    if started:
+        state.reindex_task = asyncio.create_task(state.library.reindex())   # keep a reference
+    return {"started": started}
 
 
 # --- speakers (where music plays; taco/core/speakers.py) -------------------------

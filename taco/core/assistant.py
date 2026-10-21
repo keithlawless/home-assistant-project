@@ -68,6 +68,7 @@ class Assistant:
         # (intent awaiting an answer, expiry, which slot the answer fills)
         self.pending: tuple[Intent, float, str] | None = None
         self._pairing: asyncio.Task | None = None
+        self._reindex: asyncio.Task | None = None
 
     @property
     def timers(self):
@@ -375,7 +376,8 @@ class Assistant:
 
     # -- radio ------------------------------------------------------------------
 
-    async def _do_media_play(self, query: str, speaker: str | None = None) -> dict[str, Any]:
+    async def _do_media_play(self, query: str, speaker: str | None = None, radio: bool = False,
+                             by: str | None = None, kind: str | None = None) -> dict[str, Any]:
         where = ""
         if speaker:
             chosen = resolve(speaker, await self.state.speakers.list())
@@ -385,6 +387,18 @@ class Assistant:
                 return _reply(self._unreachable(chosen))
             elif not chosen.is_kitchen:
                 where = f" on {chosen.name}"
+        library = self.state.library
+        if query and not radio and library.ready:
+            plan = await asyncio.to_thread(library.resolve, query, by, kind)
+            if plan:
+                await self.state.play_library(plan)
+                return _reply(f"Playing {plan.name}{where}.")
+            if kind == "album":
+                return _reply(f"I couldn't find an album called {query} in your music.")
+            if kind == "artist":
+                return _reply(f"I couldn't find any music by {query}.")
+        if by:
+            query = f"{query} by {by}"   # not in the library: maybe a station knows it
         last = self.state.media.station
         try:
             if not query and last:
@@ -404,7 +418,40 @@ class Assistant:
 
     async def _do_media_status(self) -> dict[str, Any]:
         st = self.state.media_status()
+        if st and (self.state.media.station or {}).get("library"):
+            song = await self.state.media.now_playing()
+            if song.get("title"):
+                who = f" by {song['artist']}" if song.get("artist") else ""
+                return _reply(f"This is {song['title']}{who}.")
         return _reply(f"This is {st['station']}." if st else "Nothing's playing right now.")
+
+    async def _do_media_skip(self, step: int) -> dict[str, Any]:
+        if await self.state.media.skip(step):
+            return _reply(silent=True)
+        if self.state.music_playing:
+            return _reply("I can only skip songs from your music collection.")
+        return _reply("Nothing's playing right now.")
+
+    # -- music library -------------------------------------------------------------
+
+    async def _do_music_reindex(self) -> dict[str, Any]:
+        library = self.state.library
+        if not library.enabled:
+            return _reply("I'm not connected to a music collection.")
+        if library.indexing:
+            return _reply("I'm already updating your music index.")
+        self._reindex = asyncio.create_task(self._reindex_music())
+        return _reply("Re-indexing your music in the background. I'll tell you when it's done.")
+
+    async def _reindex_music(self) -> None:
+        try:
+            stats = await self.state.library.reindex()
+        except Exception:
+            log.exception("music reindex failed")
+            await self.state.announce("I couldn't update your music index. Is the NAS on?")
+            return
+        if stats:
+            await self.state.announce(f"Your music index is up to date: {stats['tracks']:,} songs.")
 
     # -- speakers ----------------------------------------------------------------
 

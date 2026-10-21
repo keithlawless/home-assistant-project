@@ -343,19 +343,36 @@ def _speaker_intent(text: str) -> Intent | None:
 
 
 def _media_intent(text: str) -> Intent | None:
-    """Internet radio."""
+    """Internet radio and the music library."""
     if re.fullmatch(r"(?:stop|turn off|pause|kill|end) (?:the |this )?(?:music|radio|station|song)", text):
         return Intent("media_stop")
-    if re.fullmatch(r"what s (?:playing|this|this station|on)|what (?:station|song) is (?:this|playing)", text):
+    if re.fullmatch(r"what s (?:playing|this|this song|this station|on)|what (?:station|song) is (?:this|playing)"
+                    r"|who (?:is|s) (?:this|singing|playing)|what song is this", text):
         return Intent("media_status")
+    if re.fullmatch(r"(?:re ?index|rescan|re scan|refresh|update) (?:the |my |your )?music(?: library| collection| index)?",
+                    text):
+        return Intent("music_reindex")
+    if re.fullmatch(r"(?:next|skip)(?: this| the)?(?: song| track)|skip (?:it|this)|play the next (?:song|track)", text):
+        return Intent("media_skip", {"step": 1})
+    if re.fullmatch(r"(?:previous|last)(?: song| track)|go back a (?:song|track)|play the previous (?:song|track)", text):
+        return Intent("media_skip", {"step": -1})
     # Only "play"/"put on": "turn on the kitchen light" is a device, not a station.
     if m := re.fullmatch(r"(?:play|put on) (?:some |the |a )?(?P<q>.+?)"
-                         r"(?: radio| station| on the radio| music)?", text):
+                         r"(?P<radio> radio| station| on the radio)?(?: music)?", text):
         q = m.group("q").strip()
         slots: dict[str, Any] = {}
+        if m.group("radio"):
+            slots["radio"] = True   # never the library
         # "play jazz on the sonos": the assistant checks it is a speaker.
         if sm := re.fullmatch(r"(?P<q>.+?) (?:on|through|over) (?:the |my )?(?P<s>[a-z0-9 ]+?)(?: speaker)?", q):
             q, slots["speaker"] = sm.group("q"), sm.group("s")
+        # The library: "the album X", "songs by X", "X by Y".
+        if am := re.fullmatch(r"(?:the )?album (?P<q>.+)", q):
+            q, slots["kind"] = am.group("q"), "album"
+        elif am := re.fullmatch(r"(?:songs|music|something|anything|stuff) (?:by|from) (?P<q>.+)", q):
+            q, slots["kind"] = am.group("q"), "artist"
+        elif bm := re.fullmatch(r"(?P<q>.+?) by (?P<by>.+)", q):
+            q, slots["by"] = bm.group("q"), bm.group("by")
         if q in ("music", "radio", "some music", "something", "the radio"):
             q = ""
         return Intent("media_play", {"query": q, **slots})

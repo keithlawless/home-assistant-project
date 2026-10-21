@@ -162,7 +162,7 @@ def test_household():
 
 def test_media_and_recipe():
     assert p("Play WBUR").slots == {"query": "wbur"}
-    assert p("Play some jazz radio").slots == {"query": "jazz"}
+    assert p("Play some jazz radio").slots == {"query": "jazz", "radio": True}
     assert p("Play some music").slots == {"query": ""}
     assert p("Stop the music").name == "media_stop"
     assert p("What's playing?").name == "media_status"
@@ -192,8 +192,18 @@ def test_media_and_recipe():
     ("Connect a new Bluetooth speaker", "pair_speaker", {}),
     ("Play jazz on Sonos", "media_play", {"query": "jazz", "speaker": "sonos"}),
     ("Play music on the Sonos", "media_play", {"query": "", "speaker": "sonos"}),
-    ("Play WBUR on the radio", "media_play", {"query": "wbur"}),
     ("Put on some jazz", "media_play", {"query": "jazz"}),
+    ("Play WBUR on the radio", "media_play", {"query": "wbur", "radio": True}),
+    ("Play the album Our Time in Eden", "media_play", {"query": "our time in eden", "kind": "album"}),
+    ("Play songs by Aerosmith", "media_play", {"query": "aerosmith", "kind": "artist"}),
+    ("Play Noah's Dove by 10,000 Maniacs", "media_play", {"query": "noah s dove", "by": "10 000 maniacs"}),
+    ("Play Aerosmith on the Sonos", "media_play", {"query": "aerosmith", "speaker": "sonos"}),
+    ("Next song", "media_skip", {"step": 1}),
+    ("Skip this track", "media_skip", {"step": 1}),
+    ("Previous song", "media_skip", {"step": -1}),
+    ("Reindex music", "music_reindex", {}),
+    ("Re-index the music library", "music_reindex", {}),
+    ("Next", "recipe_nav", {"action": "next"}),
 ])
 def test_speakers(text, name, slots):
     intent = p(text)
