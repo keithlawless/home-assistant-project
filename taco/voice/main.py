@@ -152,7 +152,7 @@ class VoiceLoop:
     def _wake_for(self, room: str) -> WakeWord:
         w = self.cfg["wake"]
         tune = w["rooms"].get(room, {})
-        wake = WakeWord(w["model"], w["threshold"], tune.get("offset", 0.0), tune.get("patience", 1),
+        wake = WakeWord(w["model"], w["threshold"], tune.get("offset", 0.0), tune.get("patience", w["patience"]),
                         w["near_miss"] if w["save_clips"] else None)
         log.info("wake word %s for %s: threshold %.2f, patience %d",
                  wake.name, room, wake.threshold, wake.patience)

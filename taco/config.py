@@ -38,11 +38,14 @@ DEFAULTS: dict = {
         # /srv/taco/models/wakeword/hey_taco.onnx (see wakeword/README.md).
         "model": "hey_jarvis",
         "threshold": 0.5,   # starting point; Settings → wake sensitivity overrides it
-        # Per-room tuning on top of that sensitivity, keyed by mic name. A mic
-        # near a TV can ask for a higher score, held for more 80 ms frames:
+        # 80 ms frames in a row at or above the threshold. A real "Hey Taco"
+        # holds for about four; TV audio has fired on a one-frame spike.
+        "patience": 2,
+        # Per-room tuning, keyed by mic name. A mic near a TV can ask for a
+        # higher score, held for longer:
         #   [wake.rooms."living room"]
         #   offset = 0.1    # added to the threshold
-        #   patience = 3    # frames in a row at or above it (default 1)
+        #   patience = 3    # overrides [wake] patience
         "rooms": {},
         # Keep a short clip of every wake and near miss, for tuning and
         # retraining (taco/voice/clips.py). Near misses are runs that peak at

@@ -77,18 +77,19 @@ journalctl --user-unit taco-voice -f | grep -E "wake word|barge-in"
 
 ### Per room
 
-Sensitivity applies to every mic. A mic that hears a TV can be made stricter
-on its own in `/srv/taco/config.toml`, keyed by the mic's name:
+Every mic needs `[wake] patience = 2` frames (80 ms each) in a row at or
+above the threshold. A clean "Hey Taco" from a Piper voice stays above 0.5
+for about 4 frames, so this keeps real wakes while dropping one-frame spikes
+from TV audio. Sensitivity applies to every mic. A mic that hears a TV can be
+made stricter on its own in `/srv/taco/config.toml`, keyed by the mic's name:
 
 ```toml
 [wake.rooms."living room"]
 offset = 0.1    # added to the sensitivity threshold
-patience = 2    # 80 ms frames in a row at or above it (default 1)
+patience = 3    # overrides [wake] patience
 ```
 
-A clean "Hey Taco" from a Piper voice stays above 0.5 for about 4 frames, so
-patience 2–3 keeps real wakes while dropping one-frame spikes. Restart
-taco-voice after editing.
+Restart taco-voice after editing.
 
 ### Clips
 
