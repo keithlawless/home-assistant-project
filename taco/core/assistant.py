@@ -20,6 +20,8 @@ import httpx
 from .calendar import say_events
 from .devices.match import resolve
 from .lists import canonical, split_items
+from .media import run
+from .speakers import KITCHEN, Speaker, resolve
 from .intents import Intent, normalize, parse, say_clock, say_duration
 from .timers import Timer
 
@@ -65,6 +67,7 @@ class Assistant:
         self.state = state
         # (intent awaiting an answer, expiry, which slot the answer fills)
         self.pending: tuple[Intent, float, str] | None = None
+        self._pairing: asyncio.Task | None = None
 
     @property
     def timers(self):
@@ -372,19 +375,28 @@ class Assistant:
 
     # -- radio ------------------------------------------------------------------
 
-    async def _do_media_play(self, query: str) -> dict[str, Any]:
+    async def _do_media_play(self, query: str, speaker: str | None = None) -> dict[str, Any]:
+        where = ""
+        if speaker:
+            chosen = resolve(speaker, await self.state.speakers.list())
+            if chosen is None:
+                query = f"{query} on {speaker}".strip()   # "rock on KEXP" is a station
+            elif not await self.state.speakers.select(chosen):
+                return _reply(self._unreachable(chosen))
+            elif not chosen.is_kitchen:
+                where = f" on {chosen.name}"
         last = self.state.media.station
         try:
             if not query and last:
                 await self.state.media.play(last)
-                return _reply(f"Playing {last['name']}.")
+                return _reply(f"Playing {last['name']}{where}.")
             station = await self.state.play_radio(query or "jazz")
         except (httpx.HTTPError, OSError) as e:
             log.warning("radio failed: %s", e)
             return _reply("Sorry, I couldn't reach the radio station directory.")
         if station is None:
             return {"handled": False}   # Hermes may know a better station name
-        return _reply(f"Playing {station['name']}.")
+        return _reply(f"Playing {station['name']}{where}.")
 
     async def _do_media_stop(self) -> dict[str, Any]:
         await self.state.stop_music()
@@ -393,6 +405,56 @@ class Assistant:
     async def _do_media_status(self) -> dict[str, Any]:
         st = self.state.media_status()
         return _reply(f"This is {st['station']}." if st else "Nothing's playing right now.")
+
+    # -- speakers ----------------------------------------------------------------
+
+    @staticmethod
+    def _unreachable(speaker: Speaker) -> str:
+        return f"I couldn't connect to {speaker.name}. Make sure it's on and nearby."
+
+    async def _do_list_speakers(self) -> dict[str, Any]:
+        found = await self.state.speakers.list()
+        if not found:
+            return _reply("Right now I can only play music on the kitchen speaker. To add one, "
+                          "put it in pairing mode and say pair a new speaker.")
+        speech = f"I can play music on {_join([KITCHEN.name, *[s.name for s in found]])}."
+        if current := self.state.speakers.current:
+            speech += f" Music is on {current.name} right now."
+        return _reply(speech)
+
+    async def _do_set_speaker(self, name: str | None) -> dict[str, Any]:
+        speakers = self.state.speakers
+        found = await speakers.list()
+        chosen = resolve(name, found)
+        if chosen is None:
+            known = f"I know {_join([KITCHEN.name, *[s.name for s in found]])}." if found \
+                else "Say pair a new speaker to add one."
+            return _reply(f"I don't know a speaker called {name}. {known}")
+        if chosen.is_kitchen:
+            if not speakers.current:
+                return _reply("Music is already on the kitchen speaker.")
+            await speakers.back("asked")
+            return _reply("OK, music is back on the kitchen speaker.")
+        if speakers.current and speakers.current.mac == chosen.mac:
+            return _reply(f"Music is already on {chosen.name}.")
+        if not await speakers.select(chosen):
+            return _reply(self._unreachable(chosen))
+        return _reply(f"OK, music will play on {chosen.name}.")
+
+    async def _do_pair_speaker(self) -> dict[str, Any]:
+        if self._pairing and not self._pairing.done():
+            return _reply("I'm already looking for a speaker.")
+        self._pairing = asyncio.create_task(self._pair())
+        return _reply("Put the speaker in pairing mode. I'll look for it for the next thirty seconds.")
+
+    async def _pair(self) -> None:
+        try:
+            found = await self.state.speakers.pair()
+        except Exception:
+            log.exception("pairing failed")
+            found = None
+        await self.state.announce(f"I've paired {found.name}. Say play on {found.name} to use it." if found
+                                  else "I didn't find a speaker in pairing mode.")
 
     # -- recipe mode -------------------------------------------------------------
 
@@ -446,22 +508,16 @@ class Assistant:
         return _reply(speech + ".")
 
     async def _do_volume(self, set: float | None = None, step: float | None = None) -> dict[str, Any]:
+        target = await self.state.speakers.volume_target()   # the Bluetooth speaker, if music is on one
         if set is not None:
             level = set
         else:
-            level = min(1.0, max(0.1, (await get_volume()) + (step or 0)))
-        await run("wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", f"{level:.2f}")
+            level = min(1.0, max(0.1, (await get_volume(target)) + (step or 0)))
+        await run("wpctl", "set-volume", target, f"{level:.2f}")
         await self.state.hub.broadcast({"type": "volume", "level": level})
         return _reply(f"Volume {round(level * 10)}.")
 
 
-async def run(*cmd: str) -> str:
-    proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE,
-                                                stderr=asyncio.subprocess.DEVNULL)
-    out, _ = await proc.communicate()
-    return out.decode()
-
-
-async def get_volume() -> float:
-    m = re.search(r"Volume:\s*([\d.]+)", await run("wpctl", "get-volume", "@DEFAULT_AUDIO_SINK@"))
+async def get_volume(target: str = "@DEFAULT_AUDIO_SINK@") -> float:
+    m = re.search(r"Volume:\s*([\d.]+)", await run("wpctl", "get-volume", target))
     return float(m.group(1)) if m else 0.5

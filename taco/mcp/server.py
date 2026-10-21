@@ -408,6 +408,30 @@ def stop_music() -> str:
     return "Stopped."
 
 
+# --- speakers ------------------------------------------------------------------
+
+@mcp.tool()
+def list_speakers() -> dict:
+    """Speakers music (radio, Spotify) can play on, and the current one. Taco's
+    own voice always stays on the kitchen speaker."""
+    return _call("GET", "/api/speakers")
+
+
+@mcp.tool()
+def play_on_speaker(name: str | None = None) -> dict:
+    """Send music to a paired Bluetooth speaker by name ("Sonos"), or back to
+    the kitchen speaker with no name. Temporary: it goes back to the kitchen
+    after half an hour without music."""
+    return _call("POST", "/api/speakers/select", json={"name": name})
+
+
+@mcp.tool()
+def pair_speaker() -> dict:
+    """Pair a new Bluetooth speaker. Tell the user to put it in pairing mode
+    first; this scans for about 30 seconds."""
+    return _call("POST", "/api/speakers/pair", timeout=90)
+
+
 # --- recipes ---------------------------------------------------------------------
 
 @mcp.tool()

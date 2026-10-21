@@ -35,10 +35,11 @@ from .health import HealthMonitor, Limits, card, evaluate
 from .hub import Hub
 from .intents import normalize, parse_clock
 from .lists import ListStore
-from .media import RadioPlayer, SpotifyState, search_stations
+from .media import MUSIC_SINK, RadioPlayer, SpotifyState, search_stations
 from .notifications import NotificationStore, in_window
 from .scenes import SceneStore, scene_key
 from .scheduler import Scheduler, ScheduleStore, describe
+from .speakers import KITCHEN, Speakers, resolve
 from .weather import fetch_forecast, geocode, locate_by_ip
 from .webhook import MAX_BODY_BYTES, Rejected, WebhookGuard, forward, parse_payload
 
@@ -77,8 +78,10 @@ class State:
         h = self.cfg["health"]
         self.health = HealthMonitor(Limits(h["cpu_percent"], h["memory_percent"], h["temp_c"], h["clear_margin"]),
                                     window_s=h["window_s"], interval_s=h["interval_s"])
-        self.media = RadioPlayer(self.cfg["audio"]["output_device"], on_change=self.broadcast_media)
+        self.media = RadioPlayer(MUSIC_SINK, on_change=self.broadcast_media)
         self.spotify = SpotifyState()
+        self.speakers = Speakers(self.cfg["speakers"]["idle_revert_min"] * 60,
+                                 music_playing=lambda: self.music_playing, on_change=self.broadcast_media)
         self.recipe: dict[str, Any] | None = None
         self.alerts: list[dict[str, Any]] = []
         self.events: list[dict[str, Any]] = []   # calendar, today + 6 days
@@ -96,7 +99,10 @@ class State:
         self.assistant = Assistant(self)
 
     def media_status(self) -> dict[str, Any] | None:
-        return self.media.status() or self.spotify.status()
+        status = self.media.status() or self.spotify.status()
+        if status and self.speakers.current:
+            status = {**status, "speaker": self.speakers.current.name}
+        return status
 
     @property
     def music_playing(self) -> bool:
@@ -329,10 +335,11 @@ state: State
 async def lifespan(app: FastAPI):
     global state
     state = State()
+    await state.speakers.reset()   # a Bluetooth speaker choice never outlives a restart
     tasks = [asyncio.create_task(c) for c in (
         state.weather_loop(), state.timer_loop(), state.matter.run(), state.devices.poll_loop(),
         state.scheduler.loop(), state.alerts_loop(), state.calendar_loop(),
-        state.health_loop())]
+        state.health_loop(), state.speakers.watch())]
     yield
     for task in tasks:
         task.cancel()
@@ -861,6 +868,36 @@ async def play_media(body: dict[str, Any]) -> dict[str, Any]:
 async def stop_media() -> dict[str, bool]:
     await state.stop_music()
     return {"ok": True}
+
+
+# --- speakers (where music plays; taco/core/speakers.py) -------------------------
+
+@app.get("/api/speakers")
+async def list_speakers() -> dict[str, Any]:
+    found = await state.speakers.list()
+    current = state.speakers.current
+    return {"speakers": [KITCHEN.name, *[s.name for s in found]],
+            "current": current.name if current else KITCHEN.name}
+
+
+@app.post("/api/speakers/select")
+async def select_speaker(body: dict[str, Any]) -> dict[str, Any]:
+    """body: {"name": "Sonos"}; a null name means the kitchen speaker."""
+    found = await state.speakers.list()
+    chosen = resolve(body.get("name"), found)
+    if chosen is None:
+        known = ", ".join([KITCHEN.name, *[s.name for s in found]])
+        raise HTTPException(404, f"no speaker called {body.get('name')!r}; known: {known}")
+    if not await state.speakers.select(chosen):
+        raise HTTPException(502, f"couldn't connect to {chosen.name}; is it on?")
+    return {"speaker": chosen.name}
+
+
+@app.post("/api/speakers/pair")
+async def pair_speaker() -> dict[str, Any]:
+    """Scan ~30 s for a speaker in pairing mode, then pair with it."""
+    found = await state.speakers.pair()
+    return {"paired": found.name if found else None}
 
 
 @app.get("/api/media/search")

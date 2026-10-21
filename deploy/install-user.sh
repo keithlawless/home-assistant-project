@@ -15,6 +15,13 @@ if ! cmp -s deploy/wireplumber/51-taco-no-suspend.conf ~/.config/wireplumber/wir
   systemctl --user restart wireplumber
 fi
 
+# The "Taco Music" sink that radio and Spotify play into (see the conf file).
+mkdir -p ~/.config/pipewire/pipewire.conf.d
+if ! cmp -s deploy/pipewire/60-taco-music.conf ~/.config/pipewire/pipewire.conf.d/60-taco-music.conf; then
+  cp deploy/pipewire/60-taco-music.conf ~/.config/pipewire/pipewire.conf.d/
+  systemctl --user restart pipewire wireplumber
+fi
+
 # Spotify Connect: unpack librespot from the raspotify .deb (no sudo needed).
 if [[ ! -x ~/.local/bin/librespot ]]; then
   repo=https://dtcooper.github.io/raspotify

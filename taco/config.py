@@ -60,6 +60,9 @@ DEFAULTS: dict = {
         "end_silence_s": 0.8,     # this much silence ends the request
         "max_seconds": 12.0,
         "vad_aggressiveness": 2,  # webrtcvad 0-3
+        # Satellites hear speech from across a room, too quietly for level 2,
+        # which lost the end of requests from the living room.
+        "satellite_vad_aggressiveness": 1,
         "followup_s": 6.0,        # listen again without wake word after a question
         "ack_phrase": "Working.", # spoken once the request is transcribed; "" to disable
     },
@@ -89,6 +92,11 @@ DEFAULTS: dict = {
         # to open it to the LAN.
         "host": "127.0.0.1",
         "port": 8700,
+    },
+    "speakers": {
+        # "Play on Sonos" lasts until "play here", this long with no music,
+        # the speaker dropping off, or a taco-core restart.
+        "idle_revert_min": 30,
     },
     "kasa": {
         # Only newer Kasa firmware needs TP-Link account credentials.

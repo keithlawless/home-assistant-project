@@ -172,3 +172,29 @@ def test_media_and_recipe():
     assert p("Go to step 4").slots == {"action": "goto", "n": 4}
     assert p("Close the recipe").slots == {"action": "close"}
     assert p("Turn on the kitchen light").name == "power"     # not radio
+
+
+@pytest.mark.parametrize("text,name,slots", [
+    ("Play on Sonos", "set_speaker", {"name": "sonos"}),
+    ("Play on the Sonos speaker", "set_speaker", {"name": "sonos"}),
+    ("Switch to Sonos", "set_speaker", {"name": "sonos"}),
+    ("Send the music to the Sonos", "set_speaker", {"name": "sonos"}),
+    ("Connect to the Sonos", "set_speaker", {"name": "sonos"}),
+    ("Use the Sonos speaker", "set_speaker", {"name": "sonos"}),
+    ("Play here", "set_speaker", {"name": None}),
+    ("Switch back", "set_speaker", {"name": None}),
+    ("Switch back to the kitchen", "set_speaker", {"name": None}),
+    ("Play on the kitchen speaker", "set_speaker", {"name": None}),
+    ("List speakers", "list_speakers", {}),
+    ("What speakers are available?", "list_speakers", {}),
+    ("Which speakers can you play on?", "list_speakers", {}),
+    ("Pair a new speaker", "pair_speaker", {}),
+    ("Connect a new Bluetooth speaker", "pair_speaker", {}),
+    ("Play jazz on Sonos", "media_play", {"query": "jazz", "speaker": "sonos"}),
+    ("Play music on the Sonos", "media_play", {"query": "", "speaker": "sonos"}),
+    ("Play WBUR on the radio", "media_play", {"query": "wbur"}),
+    ("Put on some jazz", "media_play", {"query": "jazz"}),
+])
+def test_speakers(text, name, slots):
+    intent = p(text)
+    assert (intent.name, intent.slots) == (name, slots)

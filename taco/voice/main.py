@@ -324,6 +324,8 @@ class VoiceLoop:
         """One wake: a request, plus follow-ups while Taco keeps asking questions
         or keeps being interrupted."""
         start_timeout = self.cfg["listen"]["start_timeout_s"]
+        satellite = isinstance(self.active[0], NetworkMicrophone)
+        vad = self.cfg["listen"]["satellite_vad_aggressiveness" if satellite else "vad_aggressiveness"]
         while True:
             self._play_and_wait(WAKE_CHIME, 22050)
             self.events.send("state", state="listening")
@@ -332,7 +334,7 @@ class VoiceLoop:
                 start_timeout_s=start_timeout,
                 end_silence_s=self.cfg["listen"]["end_silence_s"],
                 max_seconds=self.cfg["listen"]["max_seconds"],
-                aggressiveness=self.cfg["listen"]["vad_aggressiveness"],
+                aggressiveness=vad,
             )
             if audio is None:
                 log.info("no speech after wake")

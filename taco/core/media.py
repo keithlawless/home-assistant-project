@@ -1,7 +1,11 @@
 """Music: internet radio through mpv (stations from Radio Browser, a free
 community directory) and a Spotify Connect speaker (librespot, see
 deploy/systemd/taco-spotify.service). Both are "ducked" to a low volume
-while Taco is listening or talking."""
+while Taco is listening or talking.
+
+Both play into the taco_music loopback sink (deploy/pipewire/), whose output
+speakers.py can point at a Bluetooth speaker. Taco's own voice doesn't go
+through it."""
 
 from __future__ import annotations
 
@@ -10,17 +14,47 @@ import contextlib
 import json
 import logging
 import os
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 
 log = logging.getLogger(__name__)
 
-RADIO_BROWSER = "https://all.api.radio-browser.info/json"
+# Radio Browser is run by volunteers on a few servers; "all" picks one by DNS,
+# and a single server being down (503) shouldn't stop the radio.
+RADIO_BROWSERS = ["https://all.api.radio-browser.info/json", "https://de1.api.radio-browser.info/json",
+                  "https://de2.api.radio-browser.info/json"]
 HEADERS = {"User-Agent": "Taco/0.1 (kitchen assistant)"}
 SOCKET = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "taco-mpv.sock")
 DUCK_VOLUME = 20
 NORMAL_VOLUME = 100
+MUSIC_SINK = "taco_music"   # deploy/pipewire/60-taco-music.conf
+
+
+async def run(*cmd: str, timeout: float | None = None) -> str:
+    """Run a command and return its stdout ("" if it timed out)."""
+    proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE,
+                                                stderr=asyncio.subprocess.DEVNULL)
+    try:
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        return ""
+    return out.decode(errors="replace")
+
+
+async def find_node(match: Callable[[dict[str, Any]], bool]) -> tuple[int, dict[str, Any]] | None:
+    """The first PipeWire node whose props satisfy `match`: (id, props)."""
+    try:
+        objects = json.loads(await run("pw-dump") or "[]")
+    except ValueError:
+        return None
+    for obj in objects:
+        props = (obj.get("info") or {}).get("props") or {}
+        if obj.get("type") == "PipeWire:Interface:Node" and match(props):
+            return obj["id"], props
+    return None
 
 
 async def search_stations(http: httpx.AsyncClient, query: str) -> list[dict[str, Any]]:
@@ -28,19 +62,31 @@ async def search_stations(http: httpx.AsyncClient, query: str) -> list[dict[str,
     params = {"limit": 5, "hidebroken": "true", "order": "clickcount", "reverse": "true"}
     out: list[dict[str, Any]] = []
     for field in ("name", "tag"):
-        r = await http.get(f"{RADIO_BROWSER}/stations/search", params={**params, field: query},
-                           headers=HEADERS)
-        r.raise_for_status()
-        out += [s for s in r.json() if s.get("url_resolved")]
+        out += [s for s in await _radio_browser(http, {**params, field: query}) if s.get("url_resolved")]
         if out:
             break
     return [{"name": s["name"].strip(), "url": s["url_resolved"], "tags": s.get("tags", ""),
              "country": s.get("countrycode", "")} for s in out]
 
 
+async def _radio_browser(http: httpx.AsyncClient, params: dict[str, Any]) -> list[dict[str, Any]]:
+    """Station search, trying the next server when one is down."""
+    for i, base in enumerate(RADIO_BROWSERS):
+        try:
+            r = await http.get(f"{base}/stations/search", params=params, headers=HEADERS)
+            r.raise_for_status()
+            return r.json()
+        except (httpx.TransportError, httpx.HTTPStatusError) as e:
+            if i == len(RADIO_BROWSERS) - 1 or (
+                    isinstance(e, httpx.HTTPStatusError) and e.response.status_code < 500):
+                raise
+            log.warning("radio directory %s failed (%s); trying another server", base, e)
+    return []
+
+
 class RadioPlayer:
     def __init__(self, output_device: str | None, on_change):
-        self._device = output_device
+        self._device = output_device   # normally MUSIC_SINK
         self._on_change = on_change
         self._proc: asyncio.subprocess.Process | None = None
         self.station: dict[str, Any] | None = None
@@ -126,12 +172,9 @@ class SpotifyState:
         return {"station": f"{self.track['name']}{who}", "source": "spotify"}
 
     async def duck(self, ducked: bool) -> None:
-        node = await self._node_id()
+        node = await find_node(lambda props: props.get("application.name") == self.APP_NAME)
         if node is not None:
-            proc = await asyncio.create_subprocess_exec(
-                "wpctl", "set-volume", str(node), "0.2" if ducked else "1.0",
-                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
-            await proc.wait()
+            await run("wpctl", "set-volume", str(node[0]), "0.2" if ducked else "1.0")
 
     async def stop(self) -> None:
         """librespot has no local pause control; restarting it ends the session."""
@@ -140,16 +183,3 @@ class SpotifyState:
                                                     stderr=asyncio.subprocess.DEVNULL)
         await proc.wait()
         self.playing = False
-
-    async def _node_id(self) -> int | None:
-        proc = await asyncio.create_subprocess_exec("pw-dump", stdout=asyncio.subprocess.PIPE,
-                                                    stderr=asyncio.subprocess.DEVNULL)
-        out, _ = await proc.communicate()
-        try:
-            for obj in json.loads(out or b"[]"):
-                props = (obj.get("info") or {}).get("props") or {}
-                if obj.get("type") == "PipeWire:Interface:Node" and props.get("application.name") == self.APP_NAME:
-                    return obj["id"]
-        except ValueError:
-            pass
-        return None

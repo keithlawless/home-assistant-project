@@ -316,7 +316,30 @@ def parse(raw: str, now: datetime | None = None) -> Intent | None:
 
     # Lists keep commas so "milk, eggs and bread" splits into three items.
     return (_list_intent(normalize(raw, keep_commas=True).rstrip(",")) or _household_intent(text)
-            or _media_intent(text) or _recipe_intent(text) or _device_intent(text))
+            or _speaker_intent(text) or _media_intent(text) or _recipe_intent(text)
+            or _device_intent(text))
+
+
+_MOVE = r"(?:switch|move|send|connect)(?: (?:it|the music|music|the audio|audio|the sound|sound))?"
+_BACK = r"(?:back )?(?:here|back|(?:to|in|on) (?:the )?kitchen(?: speakers?)?)"
+
+
+def _speaker_intent(text: str) -> Intent | None:
+    """Which speaker music plays on (taco/core/speakers.py)."""
+    if re.search(r"\bspeakers?\b", text) and (
+            re.search(r"\bpair\b", text) or re.search(r"\b(?:connect|add)\b.*\bnew\b", text)):
+        return Intent("pair_speaker")
+    if re.search(r"\bspeakers\b", text) and re.search(r"\b(list|show|what|which|available|any)\b", text) \
+            and not text.startswith("play "):
+        return Intent("list_speakers")
+    if re.fullmatch(rf"(?:play|{_MOVE}) {_BACK}", text) or text == "play here":
+        return Intent("set_speaker", {"name": None})
+    if m := (re.fullmatch(rf"(?:play|{_MOVE}) (?:on|through|over|to|over to) (?:the |my )?(?P<name>.+?)(?: speaker)?", text)
+             or re.fullmatch(r"use (?:the |my )?(?P<name>.+?) speaker", text)):
+        name = m.group("name")
+        if name not in ("radio", "the radio", "repeat", "shuffle", "spotify"):
+            return Intent("set_speaker", {"name": name})
+    return None
 
 
 def _media_intent(text: str) -> Intent | None:
@@ -329,9 +352,13 @@ def _media_intent(text: str) -> Intent | None:
     if m := re.fullmatch(r"(?:play|put on) (?:some |the |a )?(?P<q>.+?)"
                          r"(?: radio| station| on the radio| music)?", text):
         q = m.group("q").strip()
+        slots: dict[str, Any] = {}
+        # "play jazz on the sonos": the assistant checks it is a speaker.
+        if sm := re.fullmatch(r"(?P<q>.+?) (?:on|through|over) (?:the |my )?(?P<s>[a-z0-9 ]+?)(?: speaker)?", q):
+            q, slots["speaker"] = sm.group("q"), sm.group("s")
         if q in ("music", "radio", "some music", "something", "the radio"):
             q = ""
-        return Intent("media_play", {"query": q})
+        return Intent("media_play", {"query": q, **slots})
     return None
 
 
