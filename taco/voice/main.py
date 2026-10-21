@@ -417,6 +417,10 @@ class VoiceLoop:
     def _play_and_wait(self, audio, rate) -> None:
         self.speaker.play(audio, rate)
         self.speaker.wait()
+        if isinstance(self.active[0], NetworkMicrophone):
+            # A satellite's audio arrives a few hundred ms late, so the end of
+            # the chime would land after the flush and pass for speech.
+            time.sleep(self.cfg["listen"]["satellite_lag_s"])
         self.flush_mics()
 
 

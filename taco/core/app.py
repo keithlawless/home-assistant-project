@@ -126,11 +126,15 @@ class State:
     async def play_radio(self, query: str) -> dict[str, Any] | None:
         stations = await search_stations(self.http, query)
         if stations:
-            if self.spotify.playing:
-                await self.spotify.stop()
-            await self.media.play(stations[0])
+            await self.play_station(stations[0])
             return stations[0]
         return None
+
+    async def play_station(self, station: dict[str, Any]) -> None:
+        """A radio station, or a library playlist played again."""
+        if self.spotify.playing:
+            await self.spotify.stop()
+        await self.media.play(station)
 
     async def play_library(self, plan: Plan) -> None:
         if self.spotify.playing:
@@ -885,7 +889,7 @@ async def music_status() -> dict[str, Any]:
 
 
 @app.get("/api/music/search")
-async def music_search(q: str) -> dict[str, list]:
+async def music_search(q: str) -> dict[str, Any]:
     return await asyncio.to_thread(state.library.search, q)
 
 
@@ -1037,6 +1041,7 @@ def main() -> None:
     import uvicorn
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+    logging.getLogger("httpx").setLevel(logging.WARNING)   # a music index makes ~45,000 requests
     core = load_config()["core"]
     uvicorn.run(app, host=core["host"], port=core["port"], log_level="warning")
 

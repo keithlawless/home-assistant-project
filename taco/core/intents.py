@@ -225,6 +225,8 @@ def parse(raw: str, now: datetime | None = None) -> Intent | None:
 
     if text in STOP_PHRASES:
         return Intent("stop")
+    # Whisper often hears a spoken "play" as "place" or "plate".
+    text = re.sub(r"^(?:place|plate|played|plays) (?=\w)", "play ", text)
 
     has_timer = re.search(r"\btimers?\b", text) is not None
     has_alarm = re.search(r"\balarms?\b", text) is not None
@@ -342,6 +344,33 @@ def _speaker_intent(text: str) -> Intent | None:
     return None
 
 
+_WHEN = {"latest": "latest", "newest": "latest", "most recent": "latest", "last": "latest", "new": "latest",
+         "first": "first", "oldest": "first", "earliest": "first", "debut": "first"}
+_W = "|".join(sorted(_WHEN, key=len, reverse=True))
+_ALBUM_PICKS = [   # "spock s beard s latest album", "the first album by x", "the x album from 1999"
+    rf"(?P<a>.+?) s (?P<w>{_W}) album",
+    rf"(?P<w>{_W}) (?:album|record) (?:by|from) (?P<a>.+)",
+    rf"(?P<w>{_W}) (?P<a>.+?) (?:album|record)",
+    r"(?P<a>.+?) s album from (?:the year )?(?P<y>\d{4})",
+    r"album (?:by|from) (?P<a>.+?) from (?:the year )?(?P<y>\d{4})",
+    r"(?P<a>.+?) album from (?:the year )?(?P<y>\d{4})",
+]
+
+
+def _album_pick(q: str) -> dict[str, Any] | None:
+    """Slots for an album chosen by time rather than by name."""
+    for pattern in _ALBUM_PICKS:
+        if m := re.fullmatch(pattern, q):
+            g = m.groupdict()
+            slots: dict[str, Any] = {"query": "", "by": g["a"], "kind": "album"}
+            if g.get("w"):
+                slots["pick"] = _WHEN[g["w"]]
+            else:
+                slots["year"] = int(g["y"])
+            return slots
+    return None
+
+
 def _media_intent(text: str) -> Intent | None:
     """Internet radio and the music library."""
     if re.fullmatch(r"(?:stop|turn off|pause|kill|end) (?:the |this )?(?:music|radio|station|song)", text):
@@ -366,7 +395,9 @@ def _media_intent(text: str) -> Intent | None:
         # "play jazz on the sonos": the assistant checks it is a speaker.
         if sm := re.fullmatch(r"(?P<q>.+?) (?:on|through|over) (?:the |my )?(?P<s>[a-z0-9 ]+?)(?: speaker)?", q):
             q, slots["speaker"] = sm.group("q"), sm.group("s")
-        # The library: "the album X", "songs by X", "X by Y".
+        # The library: "x s latest album", "the album X", "songs by X", "X by Y".
+        if picked := _album_pick(q):
+            return Intent("media_play", {**picked, **slots})
         if am := re.fullmatch(r"(?:the )?album (?P<q>.+)", q):
             q, slots["kind"] = am.group("q"), "album"
         elif am := re.fullmatch(r"(?:songs|music|something|anything|stuff) (?:by|from) (?P<q>.+)", q):

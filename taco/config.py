@@ -63,6 +63,9 @@ DEFAULTS: dict = {
         # Satellites hear speech from across a room, too quietly for level 2,
         # which lost the end of requests from the living room.
         "satellite_vad_aggressiveness": 1,
+        # How late a satellite's audio arrives (Wi-Fi plus its buffer): Taco
+        # waits this long after the chime before listening on a satellite.
+        "satellite_lag_s": 0.45,  # measured ~0.3 s; more would clip a quick first word
         "followup_s": 6.0,        # listen again without wake word after a question
         "ack_phrase": "Working.", # spoken once the request is transcribed; "" to disable
     },

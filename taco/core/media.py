@@ -82,7 +82,7 @@ async def _radio_browser(http: httpx.AsyncClient, params: dict[str, Any]) -> lis
             if i == len(RADIO_BROWSERS) - 1 or (
                     isinstance(e, httpx.HTTPStatusError) and e.response.status_code < 500):
                 raise
-            log.warning("radio directory %s failed (%s); trying another server", base, e)
+            log.warning("radio directory %s failed (%s: %s); trying another server", base, type(e).__name__, e)
     return []
 
 

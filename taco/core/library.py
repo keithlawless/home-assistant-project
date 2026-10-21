@@ -62,6 +62,8 @@ COLUMNS = ("path", "size", "mtime", "artist", "album", "title", "track", "disc",
            "duration", "artist_key", "album_key", "title_key")
 # One-word requests that mean a radio genre, even if an album shares the name
 # (Queen's "Jazz").
+# Albums that "latest album" / "first album" skip.
+LIVE = re.compile(r"\b(live|unplugged|in concert)\b", re.IGNORECASE)
 GENRES = {"jazz", "rock", "blues", "country", "classical", "pop", "folk", "soul", "reggae",
           "news", "oldies", "bluegrass", "metal", "funk", "disco", "gospel", "hip hop", "rap"}
 
@@ -397,6 +399,36 @@ class Library:
         close = difflib.get_close_matches(k, keys, n=1, cutoff=0.85)
         return close[0] if close else None
 
+    def albums(self, artist_key: str) -> list[dict[str, Any]]:
+        """An artist's albums, oldest first (undated last), flagged if live."""
+        rows = self._query("SELECT album_key, album, MIN(year), COUNT(*) FROM tracks WHERE artist_key = ? "
+                           "GROUP BY album_key ORDER BY MIN(year) IS NULL, MIN(year), album", (artist_key,))
+        return [{"key": k, "album": a, "year": y, "songs": n, "live": bool(LIVE.search(a or ""))}
+                for k, a, y, n in rows]
+
+    def pick_album(self, artist: str, pick: str | None = None, year: int | None = None) -> Plan | None:
+        """'latest' / 'first' studio album, or the album from `year`, by `artist`.
+        Live albums are skipped unless an artist has nothing else."""
+        if not self.ready or not (a := self._closest("artist_key", key(artist))):
+            return None
+        albums = [al for al in self.albums(a) if al["year"]]
+        if year:
+            albums = [al for al in albums if al["year"] == str(year)]
+        albums = [al for al in albums if not al["live"]] or albums
+        if not albums:
+            return None
+        chosen = albums[-1] if pick == "latest" else albums[0]
+        songs = self._songs("artist_key = ? AND album_key = ?", (a, chosen["key"]))
+        return Plan(f"{songs[0][3]} by {songs[0][2]}", "album", [s[0] for s in songs])
+
+    def mentions_artist(self, text: str) -> bool:
+        """Whether `text` names an artist in the collection ("spock s beard s
+        latest album"), so a request Taco couldn't work out goes to Hermes
+        rather than to a radio search."""
+        words = f" {key(text)} "
+        return any(len(k) >= 4 and f" {k} " in words
+                   for (k,) in self._query("SELECT DISTINCT artist_key FROM tracks"))
+
     def resolve(self, query: str, by: str | None = None, kind: str | None = None) -> Plan | None:
         """'al green' -> his songs shuffled; 'our time in eden' -> that album in
         order; 'noahs dove' -> that song. `by` narrows to an artist."""
@@ -423,10 +455,27 @@ class Library:
                 return Plan(f"{songs[0][1]} by {songs[0][2]}", "song", [songs[0][0]])
         return None
 
-    def search(self, text: str, limit: int = 10) -> dict[str, list]:
-        """Artists, albums and songs whose names contain `text`, for Hermes."""
+    def suggest(self, text: str, limit: int = 5) -> list[str]:
+        """Artists that `text` may be a mishearing of: 'box beard' -> Spock's
+        Beard (close in spelling, or sharing a distinctive word)."""
+        k = key(text)
+        words = {w for w in k.split() if len(w) >= 4}
+        names = dict(self._query("SELECT artist_key, MIN(artist) FROM tracks GROUP BY artist_key"))
+        close = difflib.get_close_matches(k, list(names), n=limit, cutoff=0.6)
+        sharing = [a for a in names if a not in close and words & set(a.split())]
+        return [names[a] for a in (close + sorted(sharing, key=len))[:limit]]
+
+    def search(self, text: str, limit: int = 10) -> dict[str, Any]:
+        """Artists, albums and songs whose names contain `text`, for Hermes.
+        When `text` is an artist, also all their albums, oldest first. When
+        nothing matches, artists it may have been misheard for."""
         like = f"%{key(text)}%"
-        return {
+        out: dict[str, Any] = {}
+        if a := self._closest("artist_key", key(text)):
+            artist = self._query("SELECT artist FROM tracks WHERE artist_key = ? LIMIT 1", (a,))[0][0]
+            out["artist_albums"] = {"artist": artist, "albums": [
+                {k: v for k, v in al.items() if k != "key"} for al in self.albums(a)]}
+        out |= {
             "artists": [r[0] for r in self._query(
                 "SELECT artist, COUNT(*) FROM tracks WHERE artist_key LIKE ? GROUP BY artist_key LIMIT ?", (like, limit))],
             "albums": [{"album": r[0], "artist": r[1], "year": r[2]} for r in self._query(
@@ -435,6 +484,9 @@ class Library:
             "songs": [{"title": r[0], "artist": r[1], "album": r[2]} for r in self._query(
                 "SELECT title, artist, album FROM tracks WHERE title_key LIKE ? LIMIT ?", (like, limit))],
         }
+        if not any(out.values()):
+            out["did_you_mean"] = self.suggest(text)
+        return out
 
     # -- playback ----------------------------------------------------------------
 

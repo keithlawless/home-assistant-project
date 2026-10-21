@@ -414,7 +414,13 @@ def stop_music() -> str:
 @mcp.tool()
 def search_music(query: str) -> dict:
     """Search the household's own music collection by artist, album or song
-    title. Prefer it over radio when someone names an artist, album or song."""
+    title. Prefer it over radio when someone names an artist, album or song.
+    When the query is an artist, `artist_albums` lists all their albums
+    oldest first, with year and whether each is live: use it for "their latest
+    album" (skip live ones unless asked), "the album before X" or "their 90s
+    albums", then call play_music with the album and artist. Names are
+    heard by speech recognition, so if nothing matches, `did_you_mean` lists
+    artists it may have been misheard for: ask the user which one."""
     return _call("GET", "/api/music/search", params={"q": query})
 
 

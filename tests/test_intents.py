@@ -204,6 +204,17 @@ def test_media_and_recipe():
     ("Reindex music", "music_reindex", {}),
     ("Re-index the music library", "music_reindex", {}),
     ("Next", "recipe_nav", {"action": "next"}),
+    ("Place Spock's Beard's latest album", "media_play",       # Whisper's "play"
+     {"query": "", "by": "spock s beard", "kind": "album", "pick": "latest"}),
+    ("Plate jazz on the Sonos", "media_play", {"query": "jazz", "speaker": "sonos"}),
+    ("Play Spock's Beard's latest album", "media_play",
+     {"query": "", "by": "spock s beard", "kind": "album", "pick": "latest"}),
+    ("Play the newest album by Spock's Beard", "media_play",
+     {"query": "", "by": "spock s beard", "kind": "album", "pick": "latest"}),
+    ("Play Aerosmith's first album", "media_play", {"query": "", "by": "aerosmith", "kind": "album", "pick": "first"}),
+    ("Play the Aerosmith album from 1993", "media_play", {"query": "", "by": "aerosmith", "kind": "album", "year": 1993}),
+    ("Play Spock's Beard's latest album on the Sonos", "media_play",
+     {"query": "", "by": "spock s beard", "kind": "album", "pick": "latest", "speaker": "sonos"}),
 ])
 def test_speakers(text, name, slots):
     intent = p(text)

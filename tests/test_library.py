@@ -199,3 +199,44 @@ def test_mpv_auth_kept_out_of_argv(library, tmp_path, monkeypatch):
     include = tmp_path / "taco-music-auth.conf"
     assert oct(os.stat(include).st_mode & 0o777) == "0o600"
     assert "Authorization: Basic dGFjbzpwdw==" in include.read_text()
+
+
+def add_spocks_beard(nas):
+    for album, song, year in [("The Light", "The Light", "1995"), ("Snow", "Made Alive Again", "2002"),
+                              ("Noise Floor", "To Breathe Another Day", "2018"),
+                              ("The X Tour: Live", "Edge of the In-Between", "2026"),
+                              ("Rarities", "Untitled", "")]:
+        nas.add(f"Spock's Beard/{album}/01 {song}.flac",
+                {"ARTIST": "Spock's Beard", "ALBUM": album, "TITLE": song, "DATE": year})
+
+
+def test_pick_album_by_time_skips_live(nas, library):
+    add_spocks_beard(nas)
+    build(library)
+    assert library.pick_album("spock s beard", "latest").name == "Noise Floor by Spock's Beard"
+    assert library.pick_album("spocks beard", "first").name == "The Light by Spock's Beard"   # misheard
+    assert library.pick_album("spock s beard", year=2002).name == "Snow by Spock's Beard"   # "Alive" isn't live
+    assert library.pick_album("spock s beard", year=2026).name.startswith("The X Tour")   # only option
+    assert library.pick_album("spock s beard", year=1980) is None
+    assert library.pick_album("nobody", "latest") is None
+    albums = library.search("spock s beard")["artist_albums"]["albums"]
+    assert [a["album"] for a in albums][:2] == ["The Light", "Snow"] and albums[-1]["album"] == "Rarities"
+    assert [a["live"] for a in albums] == [False, False, False, True, False]
+
+
+def test_mentions_artist(nas, library):
+    add_spocks_beard(nas)
+    build(library)
+    assert library.mentions_artist("spock s beard s album before noise floor")
+    assert library.mentions_artist("the best of al green")
+    assert not library.mentions_artist("wgbh")
+    assert not library.mentions_artist("spock")    # whole names only
+
+
+def test_misheard_artists_get_suggestions(nas, library):
+    add_spocks_beard(nas)
+    build(library)
+    found = library.search("box beard")
+    assert found["did_you_mean"][0] == "Spock's Beard" and not found["artists"]
+    assert "did_you_mean" not in library.search("al green")
+    assert library.search("spock s beard")["artist_albums"]["artist"] == "Spock's Beard"

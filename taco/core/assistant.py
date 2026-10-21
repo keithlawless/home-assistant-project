@@ -20,7 +20,7 @@ import httpx
 from .calendar import say_events
 from .devices.match import resolve
 from .lists import canonical, split_items
-from .media import run
+from .media import run, search_stations
 from .speakers import KITCHEN, Speaker, resolve
 from .intents import Intent, normalize, parse, say_clock, say_duration
 from .timers import Timer
@@ -377,22 +377,34 @@ class Assistant:
     # -- radio ------------------------------------------------------------------
 
     async def _do_media_play(self, query: str, speaker: str | None = None, radio: bool = False,
-                             by: str | None = None, kind: str | None = None) -> dict[str, Any]:
-        where = ""
-        if speaker:
-            chosen = resolve(speaker, await self.state.speakers.list())
-            if chosen is None:
-                query = f"{query} on {speaker}".strip()   # "rock on KEXP" is a station
-            elif not await self.state.speakers.select(chosen):
-                return _reply(self._unreachable(chosen))
-            elif not chosen.is_kitchen:
-                where = f" on {chosen.name}"
+                             by: str | None = None, kind: str | None = None,
+                             pick: str | None = None, year: int | None = None) -> dict[str, Any]:
+        chosen = resolve(speaker, await self.state.speakers.list()) if speaker else None
+        if speaker and chosen is None:
+            query = f"{query} on {speaker}".strip()   # "rock on KEXP" is a station
+        where = f" on {chosen.name}" if chosen and not chosen.is_kitchen else ""
+
+        async def switch() -> bool:
+            """Move to the requested speaker, only once there's something to play."""
+            return chosen is None or await self.state.speakers.select(chosen)
+
         library = self.state.library
-        if query and not radio and library.ready:
-            plan = await asyncio.to_thread(library.resolve, query, by, kind)
+        if (pick or year) and not library.ready:
+            return {"handled": False}
+        if (query or by) and not radio and library.ready:
+            if pick or year:   # "spock's beard's latest album"
+                plan = await asyncio.to_thread(library.pick_album, by, pick, year)
+            else:
+                plan = await asyncio.to_thread(library.resolve, query, by, kind)
             if plan:
+                if not await switch():
+                    return _reply(self._unreachable(chosen))
                 await self.state.play_library(plan)
                 return _reply(f"Playing {plan.name}{where}.")
+            # An artist we have, asked for in a way the fast path can't sort out
+            # ("the album before Noise Floor"): Hermes can, with search_music.
+            if pick or year or await asyncio.to_thread(library.mentions_artist, f"{query} {by or ''}"):
+                return {"handled": False}
             if kind == "album":
                 return _reply(f"I couldn't find an album called {query} in your music.")
             if kind == "artist":
@@ -401,15 +413,18 @@ class Assistant:
             query = f"{query} by {by}"   # not in the library: maybe a station knows it
         last = self.state.media.station
         try:
-            if not query and last:
-                await self.state.media.play(last)
-                return _reply(f"Playing {last['name']}{where}.")
-            station = await self.state.play_radio(query or "jazz")
+            station = last if not query and last else None
+            if station is None:
+                stations = await search_stations(self.state.http, query or "jazz")
+                if not stations:
+                    return {"handled": False}   # Hermes may know a better station name
+                station = stations[0]
+            if not await switch():
+                return _reply(self._unreachable(chosen))
+            await self.state.play_station(station)
         except (httpx.HTTPError, OSError) as e:
             log.warning("radio failed: %s", e)
             return _reply("Sorry, I couldn't reach the radio station directory.")
-        if station is None:
-            return {"handled": False}   # Hermes may know a better station name
         return _reply(f"Playing {station['name']}{where}.")
 
     async def _do_media_stop(self) -> dict[str, Any]:
