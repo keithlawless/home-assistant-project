@@ -7,8 +7,9 @@ word is also watched while Taco speaks, so "Hey Taco" interrupts an answer.
 Without one, the loop is half-duplex: the mic is ignored while Taco speaks.
 
 Mic satellites in other rooms ([[audio.satellites]]) are listened to at the
-same time, each with its own wake word model; whichever mic hears the wake
-word handles that turn. Replies always play on the local speaker.
+same time, each with its own wake word model and tuning ([wake.rooms]);
+whichever mic hears the wake word handles that turn. Replies always play on
+the local speaker. Wakes and near misses are saved as clips (clips.py).
 """
 
 from __future__ import annotations
@@ -20,11 +21,13 @@ import time
 from typing import Any
 
 import httpx
+import numpy as np
 
 from taco.config import load_config, read_env_value
 from taco.voices import DEFAULT_VOICE, PREVIEW_TEXT
 
 from .alarm import AlarmPlayer
+from .clips import ClipRecorder
 from .audio import Microphone, NetworkMicrophone, Speaker, tone
 from .core_link import CoreLink
 from .hermes import HermesClient, asks_question
@@ -121,7 +124,10 @@ class VoiceLoop:
             for s in audio["satellites"]
         ]
         # openWakeWord keeps a rolling window per stream, so one model per mic.
-        self.listeners = [(mic, WakeWord(cfg["wake"]["model"], cfg["wake"]["threshold"])) for mic in mics]
+        self.listeners = [(mic, self._wake_for(mic.name)) for mic in mics]
+        w = cfg["wake"]
+        self.clips = ClipRecorder(w["clips_dir"], w["max_clips"]) if w["save_clips"] else None
+        self._wake_clip: dict | None = None   # the current wake, until its request is heard
         self.active = self.listeners[0]   # the (mic, wake) handling the current turn
         self.speaker = Speaker(audio["output_device"])
         self.stt = Transcriber(cfg["stt"]["model"], cfg["stt"]["compute_type"],
@@ -142,6 +148,15 @@ class VoiceLoop:
         self.announcer = Speaker(audio["output_device"])   # alerts, scheduled messages
         self.alarm = AlarmPlayer(Speaker(audio["output_device"]), self.synthesize)
         self.core = CoreLink(cfg["core"]["url"], self._on_core_message)
+
+    def _wake_for(self, room: str) -> WakeWord:
+        w = self.cfg["wake"]
+        tune = w["rooms"].get(room, {})
+        wake = WakeWord(w["model"], w["threshold"], tune.get("offset", 0.0), tune.get("patience", 1),
+                        w["near_miss"] if w["save_clips"] else None)
+        log.info("wake word %s for %s: threshold %.2f, patience %d",
+                 wake.name, room, wake.threshold, wake.patience)
+        return wake
 
     # -- voice and settings ------------------------------------------------------
 
@@ -173,10 +188,11 @@ class VoiceLoop:
             self.muted = muted
             log.info("microphone %s", "muted" if muted else "listening")
         threshold = WAKE_THRESHOLDS.get(settings.get("wake_sensitivity", "medium"))
-        if threshold and threshold != self.listeners[0][1].threshold:
+        if threshold and threshold != self.listeners[0][1].sensitivity:
             for _, wake in self.listeners:
-                wake.threshold = threshold
-            log.info("wake threshold %.2f", threshold)
+                wake.sensitivity = threshold
+            log.info("wake threshold %s", ", ".join(
+                f"{mic.name} {wake.threshold:.2f}" for mic, wake in self.listeners))
         self.stt.set_vocabulary(build_vocabulary(settings.get("location"), self.cfg["stt"]["vocabulary"]))
         voice = settings.get("voice") or DEFAULT_VOICE
         if voice != self.voice_id:
@@ -224,6 +240,7 @@ class VoiceLoop:
                 mic.start()
             except OSError:
                 log.exception("mic %r failed to start", mic.name)
+        threading.Thread(target=self._watch_mics, daemon=True, name="mic-watch").start()
         self._render_ack()   # also warms up the TTS graph
         log.info("listening for wake word on %s (barge-in %s)",
                  ", ".join(mic.name for mic, _ in self.listeners),
@@ -235,13 +252,22 @@ class VoiceLoop:
             if (heard := self._detect_wake()) is None:
                 continue
             score, self.active = heard
-            log.info("wake word (%.2f, %s)", score, self.active[0].name)
+            mic, wake = self.active
+            log.info("wake word (%.2f, %s)", score, mic.name)
+            if self.clips:
+                audio, scores = wake.recent()
+                self._wake_clip = {"room": mic.name, "audio": audio, "info": {
+                    "score": round(score, 3), "threshold": round(wake.threshold, 3),
+                    "patience": wake.patience, "preroll_s": round(len(audio) / 16000, 2),
+                    "scores": scores,
+                }}
             self._reset_wake()
             if self.alarm.active:
                 # Like a smart speaker: saying the name silences the alarm.
                 self.alarm.silence()
                 self.core.stop_ringing()
             self.converse()
+            self._wake_clip = None
             self._reset_wake()
             self.flush_mics()
             self.events.send("state", state="idle")
@@ -254,11 +280,35 @@ class VoiceLoop:
             while (frame := mic.read_nowait()) is not None:
                 if self.muted:
                     continue   # frames are still drained so unmuting starts fresh
-                if (score := wake.detect(frame)) is not None:
+                score = wake.detect(frame)
+                if self.clips and (miss := wake.pop_near_miss()):
+                    self.clips.save("near_miss", mic.name, miss.audio, {
+                        "peak": round(miss.peak, 3), "threshold": round(wake.threshold, 3),
+                        "frames_above": miss.frames, "patience": wake.patience,
+                        "scores": miss.scores,
+                    })
+                if score is not None:
                     if best is None or score > best[0]:
                         best = (score, (mic, wake))
                     break   # leave the rest of this mic's audio for the request
         return best
+
+    def _watch_mics(self) -> None:
+        while True:
+            time.sleep(1.0)
+            for mic, _ in self.listeners:
+                mic.check_stall()
+
+    def _clip_request(self, audio: np.ndarray | None, text: str | None) -> None:
+        """Save the current wake's clip with the request that followed it
+        (first turn only; None = nobody spoke)."""
+        clip, self._wake_clip = self._wake_clip, None
+        if clip is None or not self.clips:
+            return
+        if audio is not None:
+            clip["audio"] = np.concatenate([clip["audio"], audio])
+        clip["info"]["heard"] = text
+        self.clips.save("wake", clip["room"], clip["audio"], clip["info"])
 
     def _reset_wake(self) -> None:
         for _, wake in self.listeners:
@@ -286,12 +336,14 @@ class VoiceLoop:
             )
             if audio is None:
                 log.info("no speech after wake")
+                self._clip_request(None, None)
                 return
 
             self.events.send("state", state="thinking")
             t0 = time.monotonic()
             text = self.stt.transcribe(audio)
             log.info("heard (%.2fs): %r", time.monotonic() - t0, text)
+            self._clip_request(audio, text)
             if not text:
                 return
             self.events.send("heard", text=text)

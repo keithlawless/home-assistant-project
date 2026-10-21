@@ -21,12 +21,14 @@ import queue
 import socket
 import subprocess
 import threading
+import time
 
 import numpy as np
 
 log = logging.getLogger(__name__)
 
 FRAME_SAMPLES = 1280  # 80 ms at 16 kHz
+STALL_S = 3.0         # a live source this quiet has stopped streaming
 
 
 def _target_args(device: str | None) -> list[str]:
@@ -42,8 +44,31 @@ class _FrameSource:
         self.name = name
         self.ready = ready
         self.frames: queue.Queue[np.ndarray] = queue.Queue(maxsize=200)
+        self.last_frame: float | None = None   # time.monotonic() of the newest frame
+        self._stalled_since: float | None = None
+
+    @property
+    def live(self) -> bool:
+        """Whether frames should be arriving right now."""
+        return True
+
+    def check_stall(self, now: float | None = None) -> None:
+        """Log when a live source stops delivering audio, and when it comes
+        back. A half-open satellite connection shows up here and nowhere else."""
+        now = time.monotonic() if now is None else now
+        if not self.live or self.last_frame is None:
+            self._stalled_since = None
+            return
+        quiet = now - self.last_frame
+        if self._stalled_since is None and quiet > STALL_S:
+            self._stalled_since = self.last_frame
+            log.warning("mic %r: no audio for %.0f s", self.name, quiet)
+        elif self._stalled_since is not None and quiet <= STALL_S:
+            log.info("mic %r: audio back after %.0f s", self.name, now - self._stalled_since)
+            self._stalled_since = None
 
     def _put(self, chunk: bytes) -> None:
+        self.last_frame = time.monotonic()
         try:
             self.frames.put_nowait(np.frombuffer(chunk, dtype=np.int16))
         except queue.Full:
@@ -126,6 +151,10 @@ class NetworkMicrophone(_FrameSource):
     def connected(self) -> bool:
         return self._conn is not None
 
+    @property
+    def live(self) -> bool:
+        return self.connected   # a disconnect is logged on its own
+
     def _allowed(self, ip: str) -> bool:
         if not self._allow:
             return True
@@ -164,6 +193,7 @@ class NetworkMicrophone(_FrameSource):
             conn.settimeout(None)
             conn.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
             with self._lock:
+                self.last_frame = time.monotonic()   # don't count the time it was away
                 old, self._conn = self._conn, conn
             if old:
                 _close(old)

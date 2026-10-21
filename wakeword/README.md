@@ -74,3 +74,32 @@ detection with its score:
 ```bash
 journalctl --user-unit taco-voice -f | grep -E "wake word|barge-in"
 ```
+
+### Per room
+
+Sensitivity applies to every mic. A mic that hears a TV can be made stricter
+on its own in `/srv/taco/config.toml`, keyed by the mic's name:
+
+```toml
+[wake.rooms."living room"]
+offset = 0.1    # added to the sensitivity threshold
+patience = 2    # 80 ms frames in a row at or above it (default 1)
+```
+
+A clean "Hey Taco" from a Piper voice stays above 0.5 for about 4 frames, so
+patience 2–3 keeps real wakes while dropping one-frame spikes. Restart
+taco-voice after editing.
+
+### Clips
+
+Every wake is saved under `/srv/taco/wake_clips/wake/`: a WAV with the 2.4 s
+before the detection, then the request that followed. The JSON file next to
+it holds the per-frame scores and `heard`, the transcript, so TV false
+triggers are easy to pick out. Near misses go in `near_miss/`. These are runs
+that peaked at 0.3 or more without firing, and are usually what a missed
+"Hey Taco" looks like. Each folder keeps the newest 1000 clips. Set
+`[wake] save_clips = false` to stop recording. These clips are the data for
+training a custom verifier or retraining the model.
+
+The log also shows `mic '<name>': no audio for N s` when a mic or satellite
+stops streaming while still connected.

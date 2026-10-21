@@ -37,7 +37,20 @@ DEFAULTS: dict = {
         # Built-in name, or a path to a custom model such as
         # /srv/taco/models/wakeword/hey_taco.onnx (see wakeword/README.md).
         "model": "hey_jarvis",
-        "threshold": 0.5,
+        "threshold": 0.5,   # starting point; Settings → wake sensitivity overrides it
+        # Per-room tuning on top of that sensitivity, keyed by mic name. A mic
+        # near a TV can ask for a higher score, held for more 80 ms frames:
+        #   [wake.rooms."living room"]
+        #   offset = 0.1    # added to the threshold
+        #   patience = 3    # frames in a row at or above it (default 1)
+        "rooms": {},
+        # Keep a short clip of every wake and near miss, for tuning and
+        # retraining (taco/voice/clips.py). Near misses are runs that peak at
+        # or above near_miss without firing. Oldest clips go past max_clips.
+        "save_clips": True,
+        "clips_dir": str(TACO_HOME / "wake_clips"),
+        "near_miss": 0.3,
+        "max_clips": 1000,
     },
     "listen": {
         "start_timeout_s": 5.0,   # give up if no speech starts after the chime

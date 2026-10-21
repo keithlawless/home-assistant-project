@@ -84,3 +84,16 @@ def test_record_request_from_satellite():
     with connect(mic) as sock:
         sock.sendall(np.zeros(FRAME_SAMPLES * 4, dtype=np.int16).tobytes())
         assert record_request(mic, start_timeout_s=0.1, end_silence_s=0.5, max_seconds=2) is None
+
+
+def test_stall_ignored_while_disconnected_and_reset_on_connect(caplog):
+    mic = start_mic()
+    mic.last_frame = time.monotonic() - 60
+    mic.check_stall()
+    assert not [r for r in caplog.records if "no audio" in r.message]
+    with connect(mic):
+        wait_for(lambda: mic.connected)
+        mic.check_stall()   # last_frame was reset on connect
+        assert not [r for r in caplog.records if "no audio" in r.message]
+        mic.check_stall(now=time.monotonic() + 10)
+        assert [r for r in caplog.records if "no audio" in r.message]
