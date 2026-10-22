@@ -8,3 +8,6 @@ ui/dist/
 *.db
 wakeword/*.onnx.tmp
 .DS_Store
+# Secrets live outside the repo; never commit them.
+config.toml
+secrets.h
