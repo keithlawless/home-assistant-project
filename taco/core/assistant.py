@@ -569,6 +569,15 @@ class Assistant:
             speech += f", and a {today['precip']} percent chance of rain"
         return _reply(speech + ".")
 
+    async def _do_weather_inside(self) -> dict[str, Any]:
+        indoor = (self.state.weather or {}).get("current", {}).get("indoor")
+        if not indoor or "temp" not in indoor:
+            return {"handled": False}   # no station indoors; Hermes can say so
+        speech = f"It's {indoor['temp']} degrees inside"
+        if "humidity" in indoor:
+            speech += f", with {indoor['humidity']} percent humidity"
+        return _reply(speech + ".")
+
     async def _do_volume(self, set: float | None = None, step: float | None = None) -> dict[str, Any]:
         target = await self.state.speakers.volume_target()   # the Bluetooth speaker, if music is on one
         if set is not None:

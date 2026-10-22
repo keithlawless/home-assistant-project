@@ -299,6 +299,12 @@ def parse(raw: str, now: datetime | None = None) -> Intent | None:
                     r"|what day is (?:it|today)(?: today)?", text):
         return Intent("date")
 
+    # Indoors, from the house's weather station ("how warm is it inside").
+    if re.search(r"\b(inside|indoors|in here|in the house)\b", text) \
+            and re.search(r"\b(temperature|hot|cold|warm|humid|humidity|degrees)\b", text) \
+            and re.search(r"\b(what|how|whats|is it)\b", text):
+        return Intent("weather_inside")
+
     # Current weather here. Anything about the future or another place goes to Hermes.
     if re.search(r"\b(weather|temperature|outside|hot|cold|warm)\b", text) and not _FUTURE.search(text) \
             and not re.search(r"\b(in|at|for)\s+(?!the\b|it\b|here\b|outside\b)[a-z]+", text) \
