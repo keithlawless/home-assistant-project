@@ -55,8 +55,8 @@ say what each part is for.
 | **Waveshare ESP32-S3 AI Smart Speaker Development Board** | Optional. A mic satellite for another room; it streams audio to the Pi over Wi-Fi. One per extra room. |
 
 Also needed: the official Raspberry Pi 27 W USB-C power supply (the SSD and
-USB devices need the power) and a micro-HDMI-to-HDMI cable for the screen.
-No case or cooler is needed: this Pi is mounted bare on the back of the
+USB devices need the power). The Kogoda kit comes with every cable the screen
+needs; with a different screen you may need a micro-HDMI-to-HDMI cable. No case or cooler is needed: this Pi is mounted bare on the back of the
 display and runs fine. Taco's health monitor only warns about heat during
 long CPU-heavy jobs, such as running the test suite on the Pi.
 
