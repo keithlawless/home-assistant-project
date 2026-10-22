@@ -14,7 +14,7 @@ What it does:
 - **Kitchen timers and alarms** that survive a reboot, plus reminders, and recipes you can step through hands-free
 - **Smart home control:** Kasa HS103/HS105 plugs and Matter-over-Wi-Fi devices, with discovery, rooms, scenes and schedules (including sunrise and sunset)
 - **Shopping and to-do lists**, a calendar briefing, and web-search answers
-- **Music:** internet radio, Spotify Connect, a music collection on a NAS, and "play on <Bluetooth speaker>"
+- **Music:** internet radio, Spotify Connect, a music collection on a NAS, and "play on Sonos" for any Bluetooth speaker
 - **Mic satellites** for other rooms (an ESP32-S3 board that streams its mic to the Pi)
 - **Notifications** on screen from Pi health checks, local scripts, or outside senders through a locked-down webhook
 
@@ -229,7 +229,7 @@ Then try "turn off the living room", "set a pasta timer for 9 minutes", or
 - **Music collection on a NAS:** set `url`, `user` and `password` under
   `[music]` (WebDAV). Taco indexes it and plays it by artist, album or song.
 - **Bluetooth speakers:** pair the speaker once with `bluetoothctl`, then say
-  "play the radio on <speaker name>". Taco's voice stays in the kitchen.
+  use its name, as in "play the radio on Sonos". Taco's voice stays in the kitchen.
 - **Spotify Connect:** Taco shows up as a speaker named "Taco" in the Spotify
   app.
 
