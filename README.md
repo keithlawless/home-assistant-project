@@ -65,7 +65,8 @@ long CPU-heavy jobs, such as running the test suite on the Pi.
 Optional extras Taco can use: TP-Link Kasa HS103/HS105 smart plugs, Matter
 over Wi-Fi plugs and bulbs, a Bluetooth speaker for music, a NAS with WebDAV
 for a music collection, and a home weather station (Netatmo Weather Station,
-or any other with an API, by adding a small provider).
+sold in the EU but no longer in the US, or any other with an API, by adding a
+small provider; see the weather station section below for US alternatives).
 
 ### Accounts
 
@@ -244,6 +245,19 @@ Then try "turn off the living room", "set a pasta timer for 9 minutes", or
   whole forecast, still comes from Open-Meteo, which also takes over if the
   station is offline or its reading is over 30 minutes old. Say "what's the
   temperature inside?" for the indoor reading.
+
+  Netatmo no longer sells its weather stations in the United States, but they
+  should still be available in the EU. In the US, these stations have APIs
+  that a small provider could use (only Netatmo is built in so far; see
+  "Adding another station" in the stations README):
+  - **Ecowitt** (for example, a GW2000 or GW1100 gateway with its sensors):
+    serves readings over a local HTTP API on your LAN, with no cloud account.
+  - **WeatherFlow Tempest:** a cloud REST API with a personal access token,
+    and it also broadcasts readings on the LAN.
+  - **Ambient Weather** (for example, the WS-2902): a cloud REST API with an
+    API key and application key.
+  - **Davis WeatherLink Live:** a local HTTP API on the LAN, plus Davis's
+    cloud API.
 
   For a Netatmo station:
   1. At [dev.netatmo.com](https://dev.netatmo.com), create an app under
