@@ -156,9 +156,13 @@ cd ~/taco/deploy && docker-compose up -d
 
 ### 7. Write `/srv/taco/config.toml`
 
-Every setting has a default in [`taco/config.py`](taco/config.py), which also
-documents each one. The file only needs what you change. All passwords, tokens
-and private URLs belong here, never in the repo. A starting point:
+This file lives on the Pi, outside the repo, and holds your settings and all
+of your secrets: passwords, tokens and private URLs. Never put secrets in
+`taco/config.py` or anywhere else in the repo.
+
+[`taco/config.py`](taco/config.py) is only a reference: it lists every
+setting with its default and what it does. `config.toml` needs just the
+settings you change. A starting point:
 
 ```toml
 [audio]
