@@ -67,9 +67,11 @@ WebDAV for a music collection.
 ### Accounts
 
 - **OpenRouter** API key (required). Pick a fast, cheap model for spoken turns.
-- Optional: a web-search key for Hermes (Tavily, Exa or Firecrawl), a domain on
-  Cloudflare for the notification webhook, and Spotify Premium for Spotify
-  Connect.
+- Optional: a domain on Cloudflare for the notification webhook, and Spotify
+  Premium for Spotify Connect.
+
+Web search needs no account: with no key set, Hermes searches DuckDuckGo. A
+Tavily, Exa or Firecrawl key is an optional upgrade.
 
 ## Building your own
 
@@ -139,7 +141,8 @@ Hermes Agent docs). Then:
    `http://127.0.0.1:8642/v1`.
 3. Install Hermes's gateway as a systemd user service named `hermes-gateway`
    (Hermes's gateway setup does this), so it starts at boot.
-4. Optional: add a web-search backend key so Taco can answer from the web.
+4. Web search works out of the box through DuckDuckGo. Optionally, add a
+   Tavily, Exa or Firecrawl key to `~/.hermes/.env` for a paid search backend.
 
 You don't need to change Hermes's persona or tools by hand; step 8 does it.
 
