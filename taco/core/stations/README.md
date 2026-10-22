@@ -44,8 +44,10 @@ Taco ever loses access (for example, after a password change), generate a new
 refresh token, put it in `config.toml`, and restart taco-core; a new token there
 always replaces the stored one.
 
-Netatmo's cloud updates about every 10 minutes, and Taco checks every 5
-(`poll_s`).
+Netatmo's cloud updates about every 10 minutes, and Taco checks every 10
+(`poll_s = 600`): about 6 data requests an hour, plus a token renewal every 3
+hours. Netatmo allows 500 requests an hour per user, so leave plenty of room
+for the Netatmo app and anything else on the account.
 
 ## Adding another station
 
