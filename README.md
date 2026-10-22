@@ -198,7 +198,7 @@ sudo reboot
 - gives Hermes Taco's persona ([`hermes/SOUL.md`](hermes/SOUL.md)) and tools ([`hermes/configure.sh`](hermes/configure.sh))
 - installs the PipeWire and WirePlumber config and librespot (Spotify Connect)
 - installs and starts the systemd user services
-- replaces the desktop with a full-screen Chromium kiosk
+- replaces the desktop with a full-screen Chromium kiosk, and turns off labwc's touch mouse emulation so swiping scrolls ([`deploy/labwc/touch.sh`](deploy/labwc/touch.sh))
 
 After the reboot the screen shows Taco's home screen. The first start
 downloads the Whisper and Piper models, which takes a few minutes. Check on
