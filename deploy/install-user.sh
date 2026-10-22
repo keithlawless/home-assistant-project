@@ -53,4 +53,9 @@ if ! cmp -s deploy/labwc/autostart ~/.config/labwc/autostart; then
   cp deploy/labwc/autostart ~/.config/labwc/autostart
   echo "Kiosk autostart installed; it takes effect at next login/reboot."
 fi
+# Real touch events for the kiosk, so swiping scrolls (see the file).
+if [[ -n "$(deploy/labwc/touch.sh)" ]]; then
+  pkill -HUP -x labwc || true   # SIGHUP makes labwc reload its config
+  echo "labwc touch settings updated."
+fi
 echo "Taco services installed."
