@@ -8,6 +8,8 @@ from typing import Any
 
 import httpx
 
+from .stations import Reading
+
 log = logging.getLogger(__name__)
 
 FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
@@ -105,6 +107,42 @@ async def fetch_forecast(http: httpx.AsyncClient, location: dict[str, Any], unit
     })
     r.raise_for_status()
     return _shape(r.json(), location, imperial)
+
+
+def apply_station(weather: dict[str, Any] | None, reading: Reading | None, units: str,
+                  stale_after_s: float, now: float | None = None) -> dict[str, Any] | None:
+    """The forecast with the local station's readings in place of the model's.
+
+    current.local lists the values that came from the station (the UI shows
+    them brighter), current.indoor holds indoor readings. A missing or stale
+    reading leaves the forecast as it is.
+    """
+    if weather is None or reading is None:
+        return weather
+    if (now or time.time()) - reading.measured_at > stale_after_s:
+        return weather
+    imperial = units == "fahrenheit"
+    temp = (lambda c: round(c * 9 / 5 + 32)) if imperial else (lambda c: round(c))
+    speed = (lambda k: round(k / 1.609344)) if imperial else (lambda k: round(k))
+
+    cur = dict(weather["current"])
+    local: list[str] = []
+    out = reading.outdoor
+    for key, value, conv in (("temp", out.temp_c, temp), ("humidity", out.humidity, round),
+                             ("wind", out.wind_kmh, speed)):
+        if value is not None:
+            cur[key] = conv(value)
+            local.append(key)
+    ind = reading.indoor
+    indoor = {k: conv(v) for k, v, conv in (("temp", ind.temp_c, temp), ("humidity", ind.humidity, round),
+                                            ("co2", ind.co2_ppm, round)) if v is not None}
+    if indoor:
+        cur["indoor"] = indoor
+        local.append("indoor")
+    if not local:
+        return weather
+    cur["local"] = local
+    return {**weather, "current": cur, "station": {"measured_at": reading.measured_at}}
 
 
 def _shape(raw: dict[str, Any], location: dict[str, Any], imperial: bool) -> dict[str, Any]:

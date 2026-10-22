@@ -4,6 +4,7 @@
   --panel-2: #1a2540;
   --text: #e8eef7;
   --muted: #8a9bb8;
+  --local: #ffffff;    /* readings from a local weather station */
   --accent: #f5a524;
   --accent-soft: rgba(245, 165, 36, 0.15);
   --radius: 18px;

@@ -95,6 +95,10 @@ def test_time_date_weather_volume():
     assert p("How cold is it outside?").name == "weather_now"
     assert p("What's the weather in Boston?") is None          # another place -> Hermes
     assert p("What's the weather tomorrow?") is None           # future -> Hermes
+    assert p("What's the temperature inside?").name == "weather_inside"
+    assert p("How warm is it in the house?").name == "weather_inside"
+    assert p("What's the humidity indoors?").name == "weather_inside"
+    assert p("Is it cold in here?").name == "weather_inside"
     assert p("Turn the volume up").slots == {"step": 0.1}
     assert p("Quieter").slots == {"step": -0.1}
     assert p("Set the volume to 6").slots == {"set": 0.6}

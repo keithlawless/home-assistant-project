@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import json
 import logging
 import os
@@ -20,7 +21,7 @@ import httpx
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 
-from taco.config import load_config
+from taco.config import TACO_HOME, load_config
 from taco.voices import VOICES, is_known
 
 from .alerts import fetch_alerts
@@ -38,10 +39,12 @@ from .library import Library, Plan
 from .lists import ListStore
 from .media import MUSIC_SINK, RadioPlayer, SpotifyState, search_stations
 from .notifications import NotificationStore, in_window
+from .oauth import OAuthError
 from .scenes import SceneStore, scene_key
 from .scheduler import Scheduler, ScheduleStore, describe
 from .speakers import KITCHEN, Speakers, resolve
-from .weather import fetch_forecast, geocode, locate_by_ip
+from .stations import Reading, make_station
+from .weather import apply_station, fetch_forecast, geocode, locate_by_ip
 from .webhook import MAX_BODY_BYTES, Rejected, WebhookGuard, forward, parse_payload
 
 log = logging.getLogger("taco.core")
@@ -59,7 +62,11 @@ class State:
         self.db = Database()
         self.hub = Hub()
         self.http = httpx.AsyncClient(timeout=10.0)
-        self.weather: dict[str, Any] | None = None
+        self.forecast: dict[str, Any] | None = None   # Open-Meteo, as fetched
+        self.weather: dict[str, Any] | None = None    # forecast with station readings applied
+        self.station = make_station(self.cfg["weather_station"], TACO_HOME / "data" / "oauth")
+        self.station_reading: Reading | None = None
+        self.station_error: str | None = None
         self.voice: dict[str, Any] = {"state": "idle"}
         self.refresh_now = asyncio.Event()
         kasa = self.cfg["kasa"]
@@ -320,6 +327,32 @@ class State:
                 self.db.update_settings({"location": loc})
                 log.info("location set from IP: %s", loc["name"])
 
+    async def publish_weather(self, force: bool = False) -> None:
+        """Apply the latest station reading to the forecast; push it if it changed."""
+        merged = apply_station(self.forecast, self.station_reading, self.db.settings()["units"],
+                               self.cfg["weather_station"]["stale_after_s"])
+        changed = merged is not None and (self.weather is None or merged["current"] != self.weather["current"])
+        self.weather = merged
+        if merged is not None and (force or changed):
+            await self.hub.broadcast({"type": "weather", "weather": merged})
+
+    async def station_loop(self) -> None:
+        if self.station is None:
+            return
+        poll_s = self.cfg["weather_station"]["poll_s"]
+        while True:
+            try:
+                self.station_reading = await self.station.read(self.http)
+                if self.station_error:
+                    log.info("weather station: back (%s)", self.station.name)
+                self.station_error = None
+            except (httpx.HTTPError, OAuthError, ValueError, KeyError) as e:
+                if self.station_error is None:   # once per outage, not every poll
+                    log.warning("weather station %s unavailable: %s", self.station.name, e)
+                self.station_error = str(e) or type(e).__name__
+            await self.publish_weather()   # also drops a reading once it goes stale
+            await asyncio.sleep(poll_s)
+
     async def weather_loop(self) -> None:
         while True:
             delay = WEATHER_REFRESH_S
@@ -327,8 +360,8 @@ class State:
                 await self.ensure_location()
                 settings = self.db.settings()
                 if settings["location"]:
-                    self.weather = await fetch_forecast(self.http, settings["location"], settings["units"])
-                    await self.hub.broadcast({"type": "weather", "weather": self.weather})
+                    self.forecast = await fetch_forecast(self.http, settings["location"], settings["units"])
+                    await self.publish_weather(force=True)
                 else:
                     delay = WEATHER_RETRY_S
             except (httpx.HTTPError, KeyError, ValueError) as e:
@@ -348,7 +381,7 @@ async def lifespan(app: FastAPI):
     state = State()
     await state.speakers.reset()   # a Bluetooth speaker choice never outlives a restart
     tasks = [asyncio.create_task(c) for c in (
-        state.weather_loop(), state.timer_loop(), state.matter.run(), state.devices.poll_loop(),
+        state.weather_loop(), state.station_loop(), state.timer_loop(), state.matter.run(), state.devices.poll_loop(),
         state.scheduler.loop(), state.alerts_loop(), state.calendar_loop(),
         state.health_loop(), state.speakers.watch(), state.library.loop())]
     yield
@@ -371,6 +404,17 @@ async def get_weather() -> dict[str, Any]:
     if state.weather is None:
         raise HTTPException(503, "weather not loaded yet")
     return state.weather
+
+
+@app.get("/api/station")
+async def get_station() -> dict[str, Any]:
+    """The local weather station's last reading, for checking it works."""
+    if state.station is None:
+        return {"provider": None}
+    r = state.station_reading
+    return {"provider": state.station.name, "error": state.station_error,
+            "age_s": round(time.time() - r.measured_at) if r else None,
+            "reading": dataclasses.asdict(r) if r else None}
 
 
 @app.get("/api/weather/place")

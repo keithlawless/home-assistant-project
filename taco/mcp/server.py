@@ -137,7 +137,9 @@ def get_weather(place: str | None = None) -> dict:
     """Current conditions and today's forecast, at the house by default or
     anywhere else. Always use this rather than a web search for weather. For
     `place`, give a town and state or country ("Bethel, Maine"); for a ski area,
-    park or landmark, use the nearest town."""
+    park or landmark, use the nearest town. At the house, current.indoor (if
+    present) is the indoor reading from the house's own weather station, and
+    current.local lists which values are measured there rather than forecast."""
     w = _weather(place)
     return {"location": w["location"], "units": w["units"], "current": w["current"], "today": w["today"],
             "next_hours": w["hourly"][:12]}

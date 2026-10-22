@@ -233,6 +233,9 @@ Then try "turn off the living room", "set a pasta timer for 9 minutes", or
 - **Notifications from outside** (for example, camera motion through an Alexa
   routine): a Cloudflare tunnel that exposes only the webhook; see
   [`deploy/cloudflared/README.md`](deploy/cloudflared/README.md).
+- **A weather station at home** (Netatmo built in, others easy to add): live
+  outdoor and indoor readings on the Home screen, with the forecast as a
+  fallback; see [`taco/core/stations/README.md`](taco/core/stations/README.md).
 - **Calendar:** put your calendar's private iCal address in
   `[calendar] ical_urls`.
 - **Music collection on a NAS:** set `url`, `user` and `password` under

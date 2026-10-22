@@ -13,6 +13,8 @@
   let h24 = $derived($settings?.clock_24h ?? false);
   let w = $derived($weather);
   let deg = $derived(w ? w.units.temp.slice(0, 1) : '°');
+  // Values measured by the house's weather station (shown brighter) rather than forecast.
+  let local = $derived(new Set(w?.current.local ?? []));
 </script>
 
 <main class="home">
@@ -31,7 +33,7 @@
       {#if w}
         <div class="now">
           <WeatherIcon icon={w.current.icon} size={130} />
-          <div class="temp">{w.current.temp}<span class="deg">{deg}</span></div>
+          <div class="temp" class:local={local.has('temp')}>{w.current.temp}<span class="deg">{deg}</span></div>
         </div>
         <div class="condition">{w.current.condition}</div>
         <div class="details">
@@ -39,9 +41,17 @@
           · H {w.today.high}{deg} L {w.today.low}{deg}
         </div>
         <div class="details muted">
-          Humidity {w.current.humidity}% · Wind {w.current.wind} {w.units.wind}
+          <span class:local={local.has('humidity')}>Humidity {w.current.humidity}%</span>
+          · <span class:local={local.has('wind')}>Wind {w.current.wind} {w.units.wind}</span>
           {#if w.today.precip >= 20}· Rain {w.today.precip}%{/if}
         </div>
+        {#if w.current.indoor}
+          <div class="details local">
+            Inside {w.current.indoor.temp}{deg}
+            {#if w.current.indoor.humidity != null}· {w.current.indoor.humidity}%{/if}
+            {#if w.current.indoor.co2 != null}· CO₂ {w.current.indoor.co2}{/if}
+          </div>
+        {/if}
       {:else}
         <div class="loading">Loading weather…</div>
       {/if}
@@ -50,7 +60,12 @@
     <div class="clock">
       <div class="time">{formatTime($now, h24)}<span class="ampm">{ampm($now, h24)}</span></div>
       <div class="date">{formatDate($now)}</div>
-      {#if w}<div class="place">{w.location}</div>{/if}
+      {#if w}
+        <div class="place">
+          {w.location}{#if local.size}<span class="live" title="Live readings from your weather station"
+            aria-label="Live readings from your weather station"> ●</span>{/if}
+        </div>
+      {/if}
       <button class="lists-btn" onclick={onLists} aria-label="Lists">
         <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2"
              stroke-linecap="round" stroke-linejoin="round">
@@ -136,6 +151,10 @@
   .condition { font-size: 30px; font-weight: 500; margin-top: 4px; }
   .details { font-size: 19px; margin-top: 6px; }
   .muted, .loading { color: var(--muted); }
+  /* From the house's weather station, not the forecast. */
+  .local { color: var(--local); font-weight: 500; }
+  .temp.local { font-weight: 300; }
+  .live { color: var(--local); font-size: 12px; vertical-align: 2px; }
   .loading { font-size: 24px; margin-top: 80px; }
 
   .clock { position: relative; text-align: right; padding-top: 8px; }

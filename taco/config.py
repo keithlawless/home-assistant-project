@@ -107,6 +107,19 @@ DEFAULTS: dict = {
         "workers": 6,
         "db": str(TACO_HOME / "data" / "music.db"),
     },
+    "weather_station": {
+        # Optional local station for live current conditions
+        # (taco/core/stations/README.md). Empty provider = off: the forecast
+        # service supplies everything, as it also does for anything the
+        # station doesn't measure and whenever the station is unreachable.
+        "provider": "",            # "netatmo"
+        "poll_s": 300,
+        "stale_after_s": 1800,     # older readings are ignored
+        # [weather_station.netatmo]: client_id, client_secret, refresh_token
+        # (only a seed; Taco keeps the live tokens in /srv/taco/data/oauth),
+        # device_id (optional). Keep these in /srv/taco/config.toml only.
+        "netatmo": {},
+    },
     "speakers": {
         # "Play on Sonos" lasts until "play here", this long with no music,
         # the speaker dropping off, or a taco-core restart.
