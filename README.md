@@ -229,7 +229,7 @@ Then try "turn off the living room", "set a pasta timer for 9 minutes", or
 - **Music collection on a NAS:** set `url`, `user` and `password` under
   `[music]` (WebDAV). Taco indexes it and plays it by artist, album or song.
 - **Bluetooth speakers:** pair the speaker once with `bluetoothctl`, then say
-  use its name, as in "play the radio on Sonos". Taco's voice stays in the kitchen.
+  "play the radio on Sonos", using its name. Taco's voice stays in the kitchen.
 - **Spotify Connect:** Taco shows up as a speaker named "Taco" in the Spotify
   app.
 
