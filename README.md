@@ -11,6 +11,7 @@ What it does:
 
 - **"Hey Taco" wake word** (a custom openWakeWord model) with local speech-to-text (faster-whisper) and a choice of local voices (Piper, Kokoro)
 - **Weather home screen** with hourly and 5-day forecasts, NWS severe-weather alerts, a burn-in-safe screensaver, and a night mode that turns the panel off
+- **Your own weather station (optional):** live outdoor and indoor readings (Netatmo built in, others can be added), highlighted on screen, with the forecast as a fallback
 - **Kitchen timers and alarms** that survive a reboot, plus reminders, and recipes you can step through hands-free
 - **Smart home control:** Kasa HS103/HS105 plugs and Matter-over-Wi-Fi devices, with discovery, rooms, scenes and schedules (including sunrise and sunset)
 - **Shopping and to-do lists**, a calendar briefing, and web-search answers
@@ -35,7 +36,8 @@ For the design and the reasoning behind it, see [PLAN.md](PLAN.md).
             reply → Piper/Kokoro TTS → speaker
 
  taco-core also serves the touchscreen UI (Chromium kiosk), talks to Kasa
- plugs, the Matter server (Docker), Open-Meteo, mpv and PipeWire.
+ plugs, the Matter server (Docker), Open-Meteo, an optional weather station,
+ mpv and PipeWire.
 ```
 
 Four user services run on the Pi: `taco-core`, `taco-voice`, `hermes-gateway`
@@ -61,14 +63,16 @@ display and runs fine. Taco's health monitor only warns about heat during
 long CPU-heavy jobs, such as running the test suite on the Pi.
 
 Optional extras Taco can use: TP-Link Kasa HS103/HS105 smart plugs, Matter
-over Wi-Fi plugs and bulbs, a Bluetooth speaker for music, and a NAS with
-WebDAV for a music collection.
+over Wi-Fi plugs and bulbs, a Bluetooth speaker for music, a NAS with WebDAV
+for a music collection, and a home weather station (Netatmo Weather Station,
+or any other with an API, by adding a small provider).
 
 ### Accounts
 
 - **OpenRouter** API key (required). Pick a fast, cheap model for spoken turns.
-- Optional: a domain on Cloudflare for the notification webhook, and Spotify
-  Premium for Spotify Connect.
+- Optional: a domain on Cloudflare for the notification webhook, Spotify
+  Premium for Spotify Connect, and a free Netatmo developer app if you have a
+  Netatmo weather station.
 
 Web search needs no account: with no key set, Hermes searches DuckDuckGo. A
 Tavily, Exa or Firecrawl key is an optional upgrade.
@@ -233,9 +237,39 @@ Then try "turn off the living room", "set a pasta timer for 9 minutes", or
 - **Notifications from outside** (for example, camera motion through an Alexa
   routine): a Cloudflare tunnel that exposes only the webhook; see
   [`deploy/cloudflared/README.md`](deploy/cloudflared/README.md).
-- **A weather station at home** (Netatmo built in, others easy to add): live
-  outdoor and indoor readings on the Home screen, with the forecast as a
-  fallback; see [`taco/core/stations/README.md`](taco/core/stations/README.md).
+- **A weather station at home:** Taco uses every reading your station has
+  (outdoor temperature, humidity, wind) for the current conditions, shows them
+  in brighter text with a dot next to the town name, and adds an "Inside" line
+  (temperature, humidity, CO₂). Anything the station doesn't measure, and the
+  whole forecast, still comes from Open-Meteo, which also takes over if the
+  station is offline or its reading is over 30 minutes old. Say "what's the
+  temperature inside?" for the indoor reading.
+
+  For a Netatmo station:
+  1. At [dev.netatmo.com](https://dev.netatmo.com), create an app under
+     **My apps**, then use its **Token generator** with the scope
+     `read_station`.
+  2. Put the app's client ID and secret and the generated refresh token in
+     `config.toml`:
+
+     ```toml
+     [weather_station]
+     provider = "netatmo"
+
+     [weather_station.netatmo]
+     client_id = "..."
+     client_secret = "..."
+     refresh_token = "..."
+     ```
+  3. Restart taco-core (`systemctl --user restart taco-core`) and check
+     `curl -s localhost:8700/api/station`.
+
+  Netatmo replaces the refresh token each time it's used, so Taco keeps the
+  live tokens in `/srv/taco/data/oauth/` (readable only by `taco`); if access
+  is ever lost, generate a new refresh token and put it in `config.toml`.
+  Taco checks every 10 minutes, well under Netatmo's 500 requests an hour. To
+  add a different station, or for more detail, see
+  [`taco/core/stations/README.md`](taco/core/stations/README.md).
 - **Calendar:** put your calendar's private iCal address in
   `[calendar] ical_urls`.
 - **Music collection on a NAS:** set `url`, `user` and `password` under
@@ -262,7 +296,7 @@ cd ui && npm run dev                # UI dev server; see ui/vite.config.js for
 ## Repository layout
 
 ```
-taco/core/     FastAPI app: devices, timers, weather, lists, scenes, media, webhook
+taco/core/     FastAPI app: devices, timers, weather (+ stations/), lists, scenes, media, webhook, OAuth
 taco/voice/    wake word, VAD, speech-to-text, TTS, satellites, Hermes client
 taco/mcp/      taco-mcp, the tools Hermes uses to act on Taco
 ui/            Svelte kiosk UI
