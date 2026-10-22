@@ -63,7 +63,7 @@
       {#if w}
         <div class="place">
           {w.location}{#if local.size}<span class="live" title="Live readings from your weather station"
-            aria-label="Live readings from your weather station"> ●</span>{/if}
+            aria-label="Live readings from your weather station">●</span>{/if}
         </div>
       {/if}
       <button class="lists-btn" onclick={onLists} aria-label="Lists">
@@ -154,7 +154,7 @@
   /* From the house's weather station, not the forecast. */
   .local { color: var(--local); font-weight: 500; }
   .temp.local { font-weight: 300; }
-  .live { color: var(--local); font-size: 12px; vertical-align: 2px; }
+  .live { color: var(--local); font-size: 12px; vertical-align: 2px; margin-left: 6px; }
   .loading { font-size: 24px; margin-top: 80px; }
 
   .clock { position: relative; text-align: right; padding-top: 8px; }
