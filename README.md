@@ -7,6 +7,8 @@ the conversation goes to an LLM agent
 ([Hermes Agent](https://github.com/NousResearch/hermes-agent)) through
 OpenRouter.
 
+![Taco's home screen: current weather, clock, indoor readings, and hourly and 5-day forecasts](docs/home-screen.png)
+
 What it does:
 
 - **"Hey Taco" wake word** (a custom openWakeWord model) with local speech-to-text (faster-whisper) and a choice of local voices (Piper, Kokoro)
