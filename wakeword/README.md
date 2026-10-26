@@ -100,7 +100,8 @@ triggers are easy to pick out. Near misses go in `near_miss/`. These are runs
 that peaked at 0.3 or more without firing, and are usually what a missed
 "Hey Taco" looks like. Each folder keeps the newest 1000 clips. Set
 `[wake] save_clips = false` to stop recording. These clips are the data for
-training a custom verifier or retraining the model.
+training a custom verifier (see [verifier/README.md](verifier/README.md)) or
+retraining the model.
 
 The log also shows `mic '<name>': no audio for N s` when a mic or satellite
 stops streaming while still connected.

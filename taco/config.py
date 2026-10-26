@@ -54,6 +54,14 @@ DEFAULTS: dict = {
         "clips_dir": str(TACO_HOME / "wake_clips"),
         "near_miss": 0.3,
         "max_clips": 1000,
+        # Second-stage check, trained on this household's voices
+        # (wakeword/verifier/README.md). Every candidate (a run at or above
+        # near_miss) gets a verifier score. For now it is only logged and saved
+        # in the clip JSON, as what the verifier would have decided.
+        # "auto" uses <model>_verifier.pkl beside a custom model if it exists;
+        # or give a path, or "" for off.
+        "verifier": "auto",
+        "verifier_threshold": 0.5,
     },
     "listen": {
         "start_timeout_s": 5.0,   # give up if no speech starts after the chime
