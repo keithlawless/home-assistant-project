@@ -21,7 +21,7 @@ from .calendar import say_events
 from .devices.match import resolve
 from .lists import canonical, split_items
 from .media import run, search_stations
-from .speakers import KITCHEN, Speaker, resolve
+from .speakers import KITCHEN, Speaker, resolve as resolve_speaker
 from .intents import Intent, normalize, parse, say_clock, say_duration
 from .timers import Timer
 
@@ -379,7 +379,7 @@ class Assistant:
     async def _do_media_play(self, query: str, speaker: str | None = None, radio: bool = False,
                              by: str | None = None, kind: str | None = None,
                              pick: str | None = None, year: int | None = None) -> dict[str, Any]:
-        chosen = resolve(speaker, await self.state.speakers.list()) if speaker else None
+        chosen = resolve_speaker(speaker, await self.state.speakers.list()) if speaker else None
         if speaker and chosen is None:
             query = f"{query} on {speaker}".strip()   # "rock on KEXP" is a station
         where = f" on {chosen.name}" if chosen and not chosen.is_kitchen else ""
@@ -487,7 +487,7 @@ class Assistant:
     async def _do_set_speaker(self, name: str | None) -> dict[str, Any]:
         speakers = self.state.speakers
         found = await speakers.list()
-        chosen = resolve(name, found)
+        chosen = resolve_speaker(name, found)
         if chosen is None:
             known = f"I know {_join([KITCHEN.name, *[s.name for s in found]])}." if found \
                 else "Say pair a new speaker to add one."

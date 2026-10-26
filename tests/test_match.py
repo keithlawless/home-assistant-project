@@ -39,3 +39,18 @@ def test_empty_room_and_guess():
     assert guess_room("Living Room Lamp One", ROOMS) == "Living Room"
     assert guess_room("Bedroom Lamp Two", ROOMS) == "Bedroom"
     assert guess_room("Smart Plug", ROOMS) is None
+
+
+def test_assistant_resolves_devices_not_speakers():
+    # assistant.py also imports speakers.resolve; it once shadowed this one,
+    # so every "turn on the living room" crashed with a TypeError.
+    from types import SimpleNamespace
+
+    from taco.core.assistant import Assistant
+
+    state = SimpleNamespace(
+        devices=SimpleNamespace(registry=SimpleNamespace(all=lambda: DEVICES)),
+        db=SimpleNamespace(settings=lambda: {"rooms": ROOMS}),
+    )
+    devices, reply = Assistant(state)._targets("power", {"on": True}, "the living room", None)
+    assert reply is None and sorted(d["id"] for d in devices) == [1, 2]
