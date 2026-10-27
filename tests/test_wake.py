@@ -5,20 +5,26 @@ import numpy as np
 
 from taco.voice.audio import FRAME_SAMPLES, Microphone
 from taco.voice.clips import ClipRecorder
-from taco.voice.wake import HISTORY_FRAMES, Trigger
+from taco.voice.wake import HISTORY_FRAMES, Trigger, verifier_path
 
 FRAME = np.zeros(FRAME_SAMPLES, dtype=np.int16)
 
 
 class Scripted(Trigger):
-    """A Trigger fed a list of scores instead of a model."""
+    """A Trigger fed a list of scores instead of a model, and optionally a
+    list of verifier scores, one per frame."""
 
-    def __init__(self, scores, **kw):
+    def __init__(self, scores, verified=None, **kw):
         self.scores = iter(scores)
+        self.verified = iter(verified) if verified is not None else None
         super().__init__(**kw)
 
     def _predict(self, frame):
+        self._v = next(self.verified) if self.verified is not None else None
         return next(self.scores)
+
+    def _verify(self):
+        return self._v
 
     def run(self, n):
         return [self.detect(FRAME) for _ in range(n)]
@@ -76,6 +82,34 @@ def test_no_near_miss_after_firing_or_when_off():
     t = Scripted([0.4, 0.1])
     t.run(2)
     assert t.pop_near_miss() is None
+
+
+def test_verifier_peak_kept_for_detection():
+    t = Scripted([0.2, 0.4, 0.6, 0.7], verified=[0.99, 0.3, 0.8, 0.5], patience=2, near_miss=0.3)
+    assert t.run(4) == [None, None, None, 0.7]
+    assert t.last_verified == 0.8   # 0.99 came with a frame below the floor
+
+
+def test_verifier_peak_kept_for_near_miss():
+    t = Scripted([0.9, 0.1], verified=[0.2, 0.0], patience=2, near_miss=0.3)
+    t.run(2)
+    assert t.pop_near_miss().verified == 0.2
+
+
+def test_no_verifier_means_none():
+    t = Scripted([0.9, 0.1, 0.6], patience=1, near_miss=0.3)
+    t.run(1)
+    assert t.last_verified is None
+
+
+def test_verifier_path(tmp_path):
+    model = tmp_path / "hey_taco.onnx"
+    assert verifier_path(str(model), "auto") is None
+    (tmp_path / "hey_taco_verifier.pkl").write_bytes(b"")
+    assert verifier_path(str(model), "auto") == str(tmp_path / "hey_taco_verifier.pkl")
+    assert verifier_path("hey_jarvis", "auto") is None
+    assert verifier_path(str(model), "") is None
+    assert verifier_path(str(model), "/x.pkl") == "/x.pkl"
 
 
 def test_history_is_bounded_and_reset_clears():

@@ -34,7 +34,7 @@ from .hermes import HermesClient, asks_question
 from .listen import record_request
 from .stt import Transcriber, build_vocabulary
 from .tts import EngineCache
-from .wake import WakeWord
+from .wake import WakeWord, verifier_path
 
 log = logging.getLogger("taco.voice")
 
@@ -42,6 +42,10 @@ WAKE_CHIME = tone([660, 880], duration=0.15, volume=0.4)
 ANNOUNCE_CHIME = tone([523, 659, 784], duration=0.16, volume=0.4)
 ERROR_REPLY = "Sorry, I'm having trouble reaching my brain right now."
 WAKE_THRESHOLDS = {"low": 0.7, "medium": 0.5, "high": 0.35}
+
+
+def _verified_info(verified: float | None) -> dict:
+    return {} if verified is None else {"verifier": round(verified, 3)}
 
 
 class Events:
@@ -152,8 +156,11 @@ class VoiceLoop:
     def _wake_for(self, room: str) -> WakeWord:
         w = self.cfg["wake"]
         tune = w["rooms"].get(room, {})
+        # The verifier scores candidates from the near-miss floor up, so it needs one.
+        verifier = verifier_path(w["model"], w["verifier"])
+        floor = w["near_miss"] if w["save_clips"] or verifier else None
         wake = WakeWord(w["model"], w["threshold"], tune.get("offset", 0.0), tune.get("patience", w["patience"]),
-                        w["near_miss"] if w["save_clips"] else None)
+                        floor, verifier, w["verifier_threshold"])
         log.info("wake word %s for %s: threshold %.2f, patience %d",
                  wake.name, room, wake.threshold, wake.patience)
         return wake
@@ -253,13 +260,15 @@ class VoiceLoop:
                 continue
             score, self.active = heard
             mic, wake = self.active
-            log.info("wake word (%.2f, %s)", score, mic.name)
+            verified = wake.last_verified
+            log.info("wake word (%.2f, %s)%s", score, mic.name,
+                     f", {wake.verdict(verified)}" if verified is not None else "")
             if self.clips:
                 audio, scores = wake.recent()
                 self._wake_clip = {"room": mic.name, "audio": audio, "info": {
                     "score": round(score, 3), "threshold": round(wake.threshold, 3),
                     "patience": wake.patience, "preroll_s": round(len(audio) / 16000, 2),
-                    "scores": scores,
+                    "scores": scores, **_verified_info(verified),
                 }}
             self._reset_wake()
             if self.alarm.active:
@@ -281,12 +290,15 @@ class VoiceLoop:
                 if self.muted:
                     continue   # frames are still drained so unmuting starts fresh
                 score = wake.detect(frame)
-                if self.clips and (miss := wake.pop_near_miss()):
-                    self.clips.save("near_miss", mic.name, miss.audio, {
-                        "peak": round(miss.peak, 3), "threshold": round(wake.threshold, 3),
-                        "frames_above": miss.frames, "patience": wake.patience,
-                        "scores": miss.scores,
-                    })
+                if miss := wake.pop_near_miss():
+                    if miss.verified is not None:
+                        log.info("near miss (%.2f, %s), %s", miss.peak, mic.name, wake.verdict(miss.verified))
+                    if self.clips:
+                        self.clips.save("near_miss", mic.name, miss.audio, {
+                            "peak": round(miss.peak, 3), "threshold": round(wake.threshold, 3),
+                            "frames_above": miss.frames, "patience": wake.patience,
+                            "scores": miss.scores, **_verified_info(miss.verified),
+                        })
                 if score is not None:
                     if best is None or score > best[0]:
                         best = (score, (mic, wake))
