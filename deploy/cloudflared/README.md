@@ -59,6 +59,21 @@ systemctl --user enable --now taco-tunnel
 journalctl --user-unit taco-tunnel -f     # look for "Registered tunnel connection"
 ```
 
+## Updating cloudflared
+The tunnel runs with `--no-autoupdate`, because apt owns the binary. Updates
+come from Cloudflare's apt repo (step 2). Install them when Cloudflare sends a
+security notice, or from time to time:
+```sh
+cloudflared --version
+sudo apt-get update && sudo apt-get install --only-upgrade cloudflared
+systemctl --user restart taco-tunnel
+journalctl --user-unit taco-tunnel -n 20   # "Registered tunnel connection" x4
+```
+Then repeat the checks in step 4. The tunnel only needs
+`~/.cloudflared/<ID>.json` to run. `cert.pem` is used only by `tunnel
+create` and `route dns`. If a notice says to replace that certificate, run
+`cloudflared tunnel login` again.
+
 ## 4. Check from outside (a phone on cellular)
 - `https://taco-hook.example.com/hook/notify/<secret>?title=Hello` puts a card on screen.
 - The same URL with a wrong secret returns 404.
