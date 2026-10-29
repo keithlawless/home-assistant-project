@@ -153,3 +153,51 @@ def test_stall_logged_once_and_recovery(caplog):
     mic.last_frame = t0 + 20
     mic.check_stall(now=t0 + 20)
     assert caplog.records[-1].message == "mic 'kitchen': audio back after 20 s"
+
+
+def test_level_db_is_loudest_recent_frame():
+    t = Scripted([0.0, 0.0])
+    assert t.level_db() == -90.0
+    t.detect(FRAME)
+    assert t.level_db() == -90.0   # digital silence
+    t.detect(np.full(FRAME_SAMPLES, 3277, dtype=np.int16))
+    assert abs(t.level_db() - -20.0) < 0.1
+    t.reset()
+    assert t.level_db() == -90.0
+
+
+def _loop_with(local_level, satellite_level, limit=10.0):
+    from taco.voice.audio import NetworkMicrophone
+    from taco.voice.main import VoiceLoop
+
+    loop = VoiceLoop.__new__(VoiceLoop)   # no models or devices
+    loop.cfg = {"wake": {"local_priority_db": limit}}
+    loop.clips = None
+    kitchen, living = Scripted([0.0]), Scripted([0.9])
+    kitchen.detect(np.full(FRAME_SAMPLES, local_level, dtype=np.int16))
+    living.detect(np.full(FRAME_SAMPLES, satellite_level, dtype=np.int16))
+    satellite = NetworkMicrophone.__new__(NetworkMicrophone)
+    satellite.name = "living room"
+    loop.listeners = [(Microphone(), kitchen), (satellite, living)]
+    return loop, satellite, living
+
+
+def test_satellite_wake_ignored_when_kitchen_much_louder(caplog):
+    caplog.set_level(logging.INFO, logger="taco.voice")
+    loop, satellite, living = _loop_with(4000, 300)   # ~22 dB
+    assert loop._heard_locally(satellite, living, 0.9)
+    assert "ignored: kitchen heard it 22 dB louder" in caplog.records[-1].message
+    assert living.level_db() == -90.0   # reset
+
+
+def test_satellite_wake_kept_when_speech_is_in_its_room():
+    loop, satellite, living = _loop_with(300, 300)
+    assert not loop._heard_locally(satellite, living, 0.9)
+    loop, satellite, living = _loop_with(4000, 300, limit=0)   # off
+    assert not loop._heard_locally(satellite, living, 0.9)
+
+
+def test_local_mic_never_ignored():
+    loop, _, _ = _loop_with(4000, 300)
+    mic, wake = loop.listeners[0]
+    assert not loop._heard_locally(mic, wake, 0.9)

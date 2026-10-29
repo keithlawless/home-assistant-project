@@ -47,6 +47,11 @@ DEFAULTS: dict = {
         #   offset = 0.1    # added to the threshold
         #   patience = 3    # overrides [wake] patience
         "rooms": {},
+        # Speech in the kitchen also reaches a satellite in the next room. A
+        # satellite's wake is ignored when the local mic heard the same few
+        # seconds at least this many dB louder (kitchen speech measured 18-35
+        # dB louder on the local mic). 0 = off.
+        "local_priority_db": 10.0,
         # Keep a short clip of every wake and near miss, for tuning and
         # retraining (taco/voice/clips.py). Near misses are runs that peak at
         # or above near_miss without firing. Oldest clips go past max_clips.
