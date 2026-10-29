@@ -8,8 +8,11 @@ be saved and studied (see clips.py).
 
 An optional verifier (wakeword/verifier/) gives every candidate, meaning any
 run that reaches the near-miss floor, a second score from a small model
-trained on this household's voices. For now that score is only logged and
-saved with the clips. It doesn't decide anything yet.
+trained on this household's voices. With `enforce` on, the verifier decides:
+a candidate it accepts fires, even below the threshold, and a run it rejects
+never fires, however high the wake model scored it (TV voices). Without a
+verifier, or with `enforce` off, threshold and patience decide as before and
+the verifier score is only logged.
 """
 
 from __future__ import annotations
@@ -40,11 +43,14 @@ class Trigger:
     """Turns per-frame scores into detections. Subclasses supply _predict."""
 
     def __init__(self, sensitivity: float = 0.5, offset: float = 0.0, patience: int = 1,
-                 near_miss: float | None = None):
+                 near_miss: float | None = None, verifier_threshold: float = 0.5,
+                 enforce: bool = False):
         self.sensitivity = sensitivity   # from Settings
         self.offset = offset             # per room
         self.patience = max(1, patience)
         self.near_miss = near_miss       # report runs peaking at or above this; None = off
+        self.verifier_threshold = verifier_threshold
+        self.enforce = enforce           # the verifier, when there is one, decides
         self._history: deque[tuple[np.ndarray, float]] = deque(maxlen=HISTORY_FRAMES)
         self.reset()
 
@@ -71,7 +77,7 @@ class Trigger:
             self._peak = max(self._peak, score)
             self._run = self._run + 1 if score >= threshold else 0
             self._best_run = max(self._best_run, self._run)
-            if self._run >= self.patience:
+            if self._fires():
                 peak = self._peak
                 self.last_verified = self._verified
                 self._end_episode()
@@ -81,6 +87,11 @@ class Trigger:
             self._pending = NearMiss(self._peak, self._best_run, *self.recent(), self._verified)
         self._end_episode()
         return None
+
+    def _fires(self) -> bool:
+        if self.enforce and self._verified is not None:
+            return self._verified >= self.verifier_threshold
+        return self._run >= self.patience
 
     def recent(self) -> tuple[np.ndarray, list[float]]:
         """The last few seconds of audio fed in, and their scores."""
@@ -116,7 +127,8 @@ class Trigger:
 class WakeWord(Trigger):
     def __init__(self, model: str, threshold: float = 0.5, offset: float = 0.0,
                  patience: int = 1, near_miss: float | None = None,
-                 verifier: str | None = None, verifier_threshold: float = 0.5):
+                 verifier: str | None = None, verifier_threshold: float = 0.5,
+                 enforce: bool = False):
         import openwakeword
         from openwakeword.model import Model
 
@@ -127,9 +139,8 @@ class WakeWord(Trigger):
         openwakeword.utils.download_models(model_names=["hey_jarvis" if custom else model])
         self._model = Model(wakeword_models=[model], inference_framework="onnx")
         self._key = next(iter(self._model.models))
-        self.verifier_threshold = verifier_threshold
-        self._verifier = load_verifier(verifier) if verifier else None
-        super().__init__(threshold, offset, patience, near_miss)
+        self._verifier = load_verifier(verifier, enforce) if verifier else None
+        super().__init__(threshold, offset, patience, near_miss, verifier_threshold, enforce)
         self.name = Path(model).stem
 
     def _predict(self, frame: np.ndarray) -> float:
@@ -144,7 +155,7 @@ class WakeWord(Trigger):
         return float(self._verifier.predict_proba(features)[0][-1])
 
     def verdict(self, verified: float | None) -> str:
-        """Log text for a verifier score: what it would have decided."""
+        """Log text for a verifier score: what it decided, or would have."""
         if verified is None:
             return ""
         return f"verifier {verified:.2f} {'accept' if verified >= self.verifier_threshold else 'reject'}"
@@ -154,7 +165,7 @@ class WakeWord(Trigger):
         self._model.reset()
 
 
-def load_verifier(path: str):
+def load_verifier(path: str, enforce: bool = False):
     """The scikit-learn pipeline written by wakeword/verifier/verifier.py, or
     None if it isn't there (the wake word then works as before)."""
     try:
@@ -163,7 +174,7 @@ def load_verifier(path: str):
     except FileNotFoundError:
         log.warning("wake verifier %s not found; running without it", path)
         return None
-    log.info("wake verifier %s loaded (log only)", path)
+    log.info("wake verifier %s loaded (%s)", path, "enforcing" if enforce else "log only")
     return model
 
 

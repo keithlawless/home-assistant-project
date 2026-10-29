@@ -201,3 +201,28 @@ def test_local_mic_never_ignored():
     loop, _, _ = _loop_with(4000, 300)
     mic, wake = loop.listeners[0]
     assert not loop._heard_locally(mic, wake, 0.9)
+
+
+def test_enforced_verifier_rescues_low_scoring_wake():
+    t = Scripted([0.1, 0.35, 0.4, 0.1], verified=[None, 0.3, 0.9, None], patience=2,
+                 near_miss=0.3, enforce=True)
+    assert t.run(4) == [None, None, 0.4, None]   # fires on the accepting frame
+    assert t.last_verified == 0.9 and t.pop_near_miss() is None
+
+
+def test_enforced_verifier_rejects_high_scoring_run():
+    t = Scripted([0.9, 0.95, 0.92, 0.1], verified=[0.05, 0.08, 0.04, None], patience=2,
+                 near_miss=0.3, enforce=True)
+    assert t.run(4) == [None] * 4
+    miss = t.pop_near_miss()
+    assert miss.peak == 0.95 and miss.frames == 3 and miss.verified == 0.08
+
+
+def test_log_only_verifier_leaves_threshold_in_charge():
+    t = Scripted([0.4, 0.9, 0.95], verified=[0.99, 0.01, 0.01], patience=2, near_miss=0.3)
+    assert t.run(3) == [None, None, 0.95]
+
+
+def test_enforce_without_verifier_falls_back_to_threshold():
+    t = Scripted([0.4, 0.9, 0.95], patience=2, near_miss=0.3, enforce=True)
+    assert t.run(3) == [None, None, 0.95]

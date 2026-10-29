@@ -9,16 +9,20 @@ candidate. It learns what *your* "Hey Taco" sounds like, so it can accept a
 real wake the wake model scored low, and reject TV speech the wake model
 scored high.
 
-**It is log-only for now.** Wakes still work exactly as before
-(threshold + patience). The verifier's verdict is logged and saved in each
-clip's JSON as `"verifier"`, so its decisions can be checked against real use
-before it is allowed to decide anything:
+**It decides wakes** (`[wake] verifier_enforce = true`, the default once a
+verifier model exists). A candidate the verifier accepts fires, even when the
+wake model scored it below the threshold, and a run it rejects never fires,
+however high it scored. Each verdict is logged and saved in the clip's JSON as
+`"verifier"`:
 
 ```
 wake word (0.93, kitchen), verifier 0.95 accept
-near miss (0.37, kitchen), verifier 0.92 accept     <- a wake it would have rescued
-wake word (0.92, kitchen), verifier 0.16 reject     <- TV it would have ignored
+wake word (0.41, kitchen), verifier 0.92 accept     <- below the threshold, rescued
+wake word rejected (0.92, living room), verifier 0.04 reject     <- TV
 ```
+
+Set `verifier_enforce = false` in config.toml to go back to threshold and
+patience alone, with the verifier only logged.
 
 ## Training
 
