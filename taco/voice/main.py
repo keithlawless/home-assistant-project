@@ -261,8 +261,9 @@ class VoiceLoop:
             score, self.active = heard
             mic, wake = self.active
             verified = wake.last_verified
-            log.info("wake word (%.2f, %s)%s", score, mic.name,
-                     f", {wake.verdict(verified)}" if verified is not None else "")
+            log.info("wake word (%.2f, %s)%s%s", score, mic.name,
+                     f", {wake.verdict(verified)}" if verified is not None else "",
+                     "" if mic is self.listeners[0][0] else f", local mic {self._local_margin(wake):+.0f} dB")
             if self.clips:
                 audio, scores = wake.recent()
                 self._wake_clip = {"room": mic.name, "audio": audio, "info": {
@@ -281,6 +282,34 @@ class VoiceLoop:
             self.flush_mics()
             self.events.send("state", state="idle")
 
+    def _local_margin(self, wake: WakeWord) -> float:
+        """How much louder (dB) the local mic heard the last few seconds than
+        a satellite's wake model did."""
+        return self.listeners[0][1].level_db() - wake.level_db()
+
+    def _heard_locally(self, mic, wake: WakeWord, score: float) -> bool:
+        """A satellite also hears speech in the kitchen, and shouldn't take
+        the turn: drop its wake when the local mic heard that moment much
+        louder ([wake] local_priority_db)."""
+        limit = self.cfg["wake"]["local_priority_db"]
+        if mic is self.listeners[0][0] or not limit:
+            return False
+        margin = self._local_margin(wake)
+        if margin < limit:
+            return False
+        log.info("wake word (%.2f, %s) ignored: %s heard it %.0f dB louder",
+                 score, mic.name, self.listeners[0][0].name, margin)
+        if self.clips:
+            audio, scores = wake.recent()
+            self.clips.save("near_miss", mic.name, audio, {
+                "peak": round(score, 3), "threshold": round(wake.threshold, 3),
+                "patience": wake.patience, "scores": scores,
+                "ignored": f"local mic {margin:.0f} dB louder",
+                **_verified_info(wake.last_verified),
+            })
+        wake.reset()
+        return True
+
     def _detect_wake(self):
         """Feed every mic's buffered frames to its wake model. Returns
         (score, (mic, wake)) for the strongest detection, or None."""
@@ -291,14 +320,21 @@ class VoiceLoop:
                     continue   # frames are still drained so unmuting starts fresh
                 score = wake.detect(frame)
                 if miss := wake.pop_near_miss():
+                    local = mic is self.listeners[0][0]
+                    # Satellites log the local mic's margin too, for tuning local_priority_db.
+                    margin = None if local else round(self._local_margin(wake), 1)
                     if miss.verified is not None:
-                        log.info("near miss (%.2f, %s), %s", miss.peak, mic.name, wake.verdict(miss.verified))
+                        log.info("near miss (%.2f, %s), %s%s", miss.peak, mic.name, wake.verdict(miss.verified),
+                                 "" if local else f", local mic {margin:+.0f} dB")
                     if self.clips:
                         self.clips.save("near_miss", mic.name, miss.audio, {
                             "peak": round(miss.peak, 3), "threshold": round(wake.threshold, 3),
                             "frames_above": miss.frames, "patience": wake.patience,
                             "scores": miss.scores, **_verified_info(miss.verified),
+                            **({} if local else {"local_margin_db": margin}),
                         })
+                if score is not None and self._heard_locally(mic, wake, score):
+                    break
                 if score is not None:
                     if best is None or score > best[0]:
                         best = (score, (mic, wake))

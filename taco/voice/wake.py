@@ -89,6 +89,13 @@ class Trigger:
         frames, scores = zip(*self._history)
         return np.concatenate(frames), [round(s, 3) for s in scores]
 
+    def level_db(self) -> float:
+        """The loudest recent 80 ms frame, in dBFS (silence counts as -90)."""
+        if not self._history:
+            return -90.0
+        rms = max(float(np.sqrt(np.mean(f.astype(np.float32) ** 2))) for f, _ in self._history)
+        return max(20 * np.log10(max(rms, 1e-9) / 32768), -90.0)
+
     def pop_near_miss(self) -> NearMiss | None:
         pending, self._pending = self._pending, None
         return pending
