@@ -61,12 +61,14 @@ DEFAULTS: dict = {
         "max_clips": 1000,
         # Second-stage check, trained on this household's voices
         # (wakeword/verifier/README.md). Every candidate (a run at or above
-        # near_miss) gets a verifier score. For now it is only logged and saved
-        # in the clip JSON, as what the verifier would have decided.
+        # near_miss) gets a verifier score, saved in the clip JSON. With
+        # verifier_enforce the verifier decides: candidates it accepts fire
+        # (even below the threshold), runs it rejects never do. Off = log only.
         # "auto" uses <model>_verifier.pkl beside a custom model if it exists;
         # or give a path, or "" for off.
         "verifier": "auto",
         "verifier_threshold": 0.5,
+        "verifier_enforce": True,
     },
     "listen": {
         "start_timeout_s": 5.0,   # give up if no speech starts after the chime

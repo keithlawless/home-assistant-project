@@ -160,7 +160,7 @@ class VoiceLoop:
         verifier = verifier_path(w["model"], w["verifier"])
         floor = w["near_miss"] if w["save_clips"] or verifier else None
         wake = WakeWord(w["model"], w["threshold"], tune.get("offset", 0.0), tune.get("patience", w["patience"]),
-                        floor, verifier, w["verifier_threshold"])
+                        floor, verifier, w["verifier_threshold"], w["verifier_enforce"])
         log.info("wake word %s for %s: threshold %.2f, patience %d",
                  wake.name, room, wake.threshold, wake.patience)
         return wake
@@ -324,7 +324,9 @@ class VoiceLoop:
                     # Satellites log the local mic's margin too, for tuning local_priority_db.
                     margin = None if local else round(self._local_margin(wake), 1)
                     if miss.verified is not None:
-                        log.info("near miss (%.2f, %s), %s%s", miss.peak, mic.name, wake.verdict(miss.verified),
+                        # With the verifier enforcing, a run over the threshold can still be turned down.
+                        kind = "wake word rejected" if wake.enforce and miss.peak >= wake.threshold else "near miss"
+                        log.info("%s (%.2f, %s), %s%s", kind, miss.peak, mic.name, wake.verdict(miss.verified),
                                  "" if local else f", local mic {margin:+.0f} dB")
                     if self.clips:
                         self.clips.save("near_miss", mic.name, miss.audio, {
