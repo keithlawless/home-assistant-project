@@ -25,7 +25,7 @@ from taco.config import TACO_HOME, load_config
 from taco.voices import VOICES, is_known
 
 from .alerts import fetch_alerts
-from .assistant import Assistant
+from .assistant import CLEANING_S, Assistant
 from .calendar import fetch_events
 from .db import Database
 from .devices.base import DeviceError
@@ -92,6 +92,7 @@ class State:
         self.speakers = Speakers(self.cfg["speakers"]["idle_revert_min"] * 60,
                                  music_playing=lambda: self.music_playing, on_change=self.broadcast_media)
         self.recipe: dict[str, Any] | None = None
+        self.cleaning_until = 0.0   # wall clock; the touchscreen ignores taps until then
         self.alerts: list[dict[str, Any]] = []
         self.events: list[dict[str, Any]] = []   # calendar, today + 6 days
         self._announced_alerts: set[str] = set()
@@ -126,6 +127,14 @@ class State:
 
     async def broadcast_media(self) -> None:
         await self.hub.broadcast({"type": "media", "media": self.media_status()})
+
+    def cleaning_left(self) -> float:
+        return max(0.0, self.cleaning_until - time.time())
+
+    async def set_cleaning(self, on: bool) -> None:
+        """Cleaning mode: the kiosk ignores touches for a while; voice keeps working."""
+        self.cleaning_until = time.time() + CLEANING_S if on else 0.0
+        await self.hub.broadcast({"type": "cleaning", "seconds": self.cleaning_left()})
 
     async def broadcast_recipe(self) -> None:
         await self.hub.broadcast({"type": "recipe", "recipe": self.recipe})
@@ -309,6 +318,7 @@ class State:
                 "found": self.devices.found_payload(), "lists": self.lists_payload(),
                 "scenes": self.scenes.all(), "schedules": self.schedules_payload(), "alerts": self.alerts,
                 "media": self.media_status(), "recipe": self.recipe,
+                "cleaning": self.cleaning_left(),
                 "notifications": self.notifications.active(),
                 "events": self.events_on(datetime.now().date())}
 

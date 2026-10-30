@@ -31,6 +31,7 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 PENDING_TTL_S = 20
+CLEANING_S = 30   # how long cleaning mode ignores the touchscreen
 
 
 def _reply(speech: str = "", silent: bool = False) -> dict[str, Any]:
@@ -373,6 +374,13 @@ class Assistant:
         self.state.db.update_settings({"mic_muted": True})
         await self.state.hub.broadcast({"type": "settings", "settings": self.state.db.settings()})
         return _reply("OK, I've stopped listening. Tap the microphone on the screen when you want me back.")
+
+    async def _do_cleaning_mode(self, on: bool) -> dict[str, Any]:
+        was_on = self.state.cleaning_left() > 0
+        await self.state.set_cleaning(on)
+        if not on:
+            return _reply("OK, the screen is back on." if was_on else "Cleaning mode isn't on.")
+        return _reply(f"Cleaning mode. I'll ignore the touchscreen for {CLEANING_S} seconds.")
 
     # -- radio ------------------------------------------------------------------
 

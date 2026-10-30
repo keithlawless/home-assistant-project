@@ -164,6 +164,18 @@ def test_household():
     assert p("Turn on the living room") .name == "power"   # not a scene
 
 
+@pytest.mark.parametrize("text", ["Cleaning mode", "Turn on cleaning mode", "Start cleaning mode.",
+                                  "I want to clean the screen", "Lock the screen", "Screen cleaning mode"])
+def test_cleaning_mode_on(text):
+    assert p(text).name == "cleaning_mode" and p(text).slots == {"on": True}
+
+
+@pytest.mark.parametrize("text", ["Stop cleaning mode", "Turn off cleaning mode", "Exit cleaning mode",
+                                  "Cleaning mode off", "I'm done cleaning"])
+def test_cleaning_mode_off(text):
+    assert p(text).name == "cleaning_mode" and p(text).slots == {"on": False}
+
+
 def test_media_and_recipe():
     assert p("Play WBUR").slots == {"query": "wbur"}
     assert p("Play some jazz radio").slots == {"query": "jazz", "radio": True}
