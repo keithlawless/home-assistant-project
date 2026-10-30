@@ -21,7 +21,8 @@ What it does:
 - **Mic satellites** for other rooms (an ESP32-S3 board that streams its mic to the Pi)
 - **Notifications** on screen from Pi health checks, local scripts, or outside senders through a locked-down webhook
 
-For the design and the reasoning behind it, see [PLAN.md](PLAN.md).
+For what you can say to Taco, see the [cheat sheet](docs/cheat-sheet.md). For the design and the reasoning
+behind it, see [PLAN.md](PLAN.md).
 
 ## How it fits together
 

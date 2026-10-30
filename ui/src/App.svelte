@@ -10,8 +10,9 @@
   import VoiceOverlay from './lib/VoiceOverlay.svelte';
   import Ringing from './lib/Ringing.svelte';
   import Recipe from './lib/Recipe.svelte';
+  import Cleaning from './lib/Cleaning.svelte';
   import { connect, connected, settings, timers, voiceEvents, screenMode, saveSettings, recipe,
-           notificationWake } from './lib/store.js';
+           notificationWake, cleaningUntil } from './lib/store.js';
 
   const SHIFT_EVERY_MS = 3 * 60_000;
   const SHIFT_PX = 4;
@@ -87,6 +88,15 @@
   // even from night mode.
   $effect(() => {
     if ($notificationWake) {
+      activity();
+      saverOn = false;
+      setNight(false);
+    }
+  });
+
+  // Cleaning mode wakes the screen so the countdown (and the smudges) show.
+  $effect(() => {
+    if ($cleaningUntil) {
       activity();
       saverOn = false;
       setNight(false);
@@ -179,6 +189,7 @@
   <Screensaver onWake={() => { activity(); saverOn = false; }} />
 {/if}
 <Ringing />
+<Cleaning />
 
 <style>
   .shell {

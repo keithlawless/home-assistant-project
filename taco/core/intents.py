@@ -458,7 +458,15 @@ def _list_intent(text: str) -> Intent | None:
 
 
 def _household_intent(text: str) -> Intent | None:
-    """Scenes, the morning briefing, and muting the microphone."""
+    """Scenes, the morning briefing, cleaning mode, and muting the microphone."""
+    # Before scenes: "turn on cleaning mode" is not a scene.
+    if re.fullmatch(r"(?:(?:stop|end|exit|leave|cancel|turn off) (?:the )?(?:screen )?cleaning(?: mode)?"
+                    r"|(?:screen )?cleaning mode off|i m done cleaning|done cleaning)", text):
+        return Intent("cleaning_mode", {"on": False})
+    if re.fullmatch(r"(?:(?:start|enter|activate|begin|turn on|switch to|go to|go into) (?:the )?)?"
+                    r"(?:screen )?cleaning mode(?: on)?|(?:i want to |let me |i need to )?clean (?:the |your )?screen"
+                    r"|lock (?:the )?(?:touch ?)?screen(?: for cleaning)?", text):
+        return Intent("cleaning_mode", {"on": True})
     if re.fullmatch(r"(?:stop listening|mute(?: the)? (?:microphone|mic)|turn off(?: the)? (?:microphone|mic)"
                     r"|privacy mode|don t listen)", text):
         return Intent("mic_mute")

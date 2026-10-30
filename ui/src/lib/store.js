@@ -20,6 +20,10 @@ export const notificationWake = writable(0);
 export const screenMode = writable('on');
 // Each voice event from taco-voice: {type: 'state'|'heard'|'tool'|'reply', ...}
 export const voiceEvents = writable(null);
+// Cleaning mode: when (Date.now() ms) the touchscreen starts answering again; 0 = off.
+export const cleaningUntil = writable(0);
+
+const cleaningEnd = (seconds) => (seconds > 0 ? Date.now() + seconds * 1000 : 0);
 
 function handle(msg) {
   switch (msg.type) {
@@ -36,6 +40,7 @@ function handle(msg) {
       media.set(msg.media ?? null);
       recipe.set(msg.recipe ?? null);
       notifications.set(msg.notifications ?? []);
+      cleaningUntil.set(cleaningEnd(msg.cleaning ?? 0));
       break;
     case 'notifications':
       notifications.set(msg.notifications);
@@ -76,6 +81,9 @@ function handle(msg) {
       break;
     case 'settings':
       settings.set(msg.settings);
+      break;
+    case 'cleaning':
+      cleaningUntil.set(cleaningEnd(msg.seconds));
       break;
     case 'voice':
       voiceEvents.set(msg.event);
