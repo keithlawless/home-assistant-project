@@ -232,6 +232,8 @@ A common `TTSEngine` interface streams sentence by sentence, so speech starts be
     channel as its reference. The same AFE adds beamforming and noise
     suppression, the longer-term fix for TV noise from the 2026-11-05
     wake analysis.
-  - Decide with the household: should alarms, timers and announcements
-    also play there, or only replies? And should the kitchen chime too?
+  - Decided 2026-11-05: only replies to satellite turns play there.
+    Alarms, timers and announcements stay on the kitchen speaker. The wake
+    chime plays in both rooms: on the satellite, and on the kitchen speaker
+    as today.
   - Depends on the back channel from the item above, so build that first.
