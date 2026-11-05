@@ -278,3 +278,11 @@ def test_events_need_the_token():
     mic = start_mic()
     assert send_event(mic, "MUTE on", token="wrong") == b""
     assert mic.button_muted is None
+
+
+def test_levels_event_is_logged(caplog):
+    import logging
+    caplog.set_level(logging.INFO, logger="taco.voice.audio")
+    mic = start_mic()
+    assert send_event(mic, "LEVELS -70/-50 -48/-20 -90/-90 -47/-19") == b"OK\n"
+    assert "channel levels (rms/peak dBFS) -70/-50 -48/-20 -90/-90 -47/-19" in caplog.text

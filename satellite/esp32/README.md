@@ -1,6 +1,6 @@
 # ESP32 mic satellite (Waveshare ESP32-S3-AUDIO-Board)
 
-This firmware turns the Waveshare ESP32-S3-AUDIO-Board into a Taco mic satellite. It mixes the board's two mics to mono and streams them to taco-voice over Wi-Fi. It uses the same protocol as `../taco_satellite.py`, so nothing changes on the Pi side. After the first USB flash, updates go over Wi-Fi (see [Firmware updates over Wi-Fi](#firmware-updates-over-wi-fi)). The LED ring shows when Taco is listening, and the middle key mutes the mic. The speaker isn't used yet.
+This firmware turns the Waveshare ESP32-S3-AUDIO-Board into a Taco mic satellite. It mixes the board's two mics to mono and streams them to taco-voice over Wi-Fi. The ES7210 is read as four 16-bit channels (32-bit stereo I2S): 0 is the speaker loopback, 1 and 3 are the mics, and 2 is unused. Firmware before November 2026 read it as 16-bit stereo, which mixed one mic with the silent loopback. It uses the same protocol as `../taco_satellite.py`, so nothing changes on the Pi side. After the first USB flash, updates go over Wi-Fi (see [Firmware updates over Wi-Fi](#firmware-updates-over-wi-fi)). The LED ring shows when Taco is listening, and the middle key mutes the mic. The speaker isn't used yet.
 
 ## One-time setup on the Mac
 ```sh
@@ -72,6 +72,7 @@ If the monitor shows `can't reach Taco at 192.168.4.239:10700; retrying`, nothin
 - To hear what the satellite hears, record from the Pi side with taco-voice stopped. Or temporarily point `TACO_HOST` at your Mac and run `nc -l 10700 > out.raw`, then play it back with `play -t raw -r 16000 -e signed -b 16 -c 1 out.raw` (from sox). The first line of `out.raw` is the handshake text.
 
 ## Notes
+- Every `LEVELS_EVERY_S` (in `main.c`; 0 turns it off), the board reports each channel's rms and peak dBFS. taco-voice logs it as `channel levels (rms/peak dBFS) …`.
 - The audio isn't encrypted. The token and the `allow` list are the only protection, so keep port 10700 on the LAN.
 - Possible next steps on this board:
   - playing replies on its speaker (the ES7210 has a speaker loopback channel that echo cancellation could use)

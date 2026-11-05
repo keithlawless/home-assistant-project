@@ -6,8 +6,10 @@
  *   "TACO <name> <token>\n", then raw little-endian samples, forever.
  * Wake word, VAD and STT all run on the kitchen Pi.
  *
- * Audio path: ES7210 ADC (I2C 0x40, MIC1/MIC2) -> I2S0 in standard stereo
- * mode with the ESP32 as clock master -> mic task (mix to mono) -> stream
+ * Audio path: ES7210 ADC (I2C 0x40, all four inputs) -> I2S0 in 32-bit
+ * stereo mode, which packs four 16-bit channels per frame (Waveshare's
+ * layout: 0 = speaker reference, 1 = mic, 2 = unused, 3 = mic), with the
+ * ESP32 as clock master -> mic task (mix the two mics to mono) -> stream
  * buffer -> net task -> socket. The two tasks are decoupled so a slow or
  * dropped connection never stalls I2S; audio is simply dropped instead.
  *
@@ -32,6 +34,7 @@
  * too, via the bootloader).
  */
 
+#include <math.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <netdb.h>
@@ -78,6 +81,12 @@ static const char *TAG = "taco-sat";
 #define RING_MAX      48   // brightness cap, 0-255: this sits in a living room
 
 #define SAMPLE_RATE   16000
+#define ADC_CHANNELS  4                    // per frame, see the audio path above
+#define MIC_A         1                    // the two mic channels
+#define MIC_B         3
+// Every LEVELS_EVERY_S, report each channel's level to taco-voice (rms and
+// peak dBFS), to check the channel layout. 0 = off.
+#define LEVELS_EVERY_S 60
 #define FRAME_SAMPLES 1280                 // 80 ms, the frame size taco-voice uses
 #define FRAME_BYTES   (FRAME_SAMPLES * 2)  // mono s16
 #define STREAM_BYTES  (FRAME_BYTES * 8)    // ~0.6 s of slack for network hiccups
@@ -93,6 +102,8 @@ static volatile bool s_house_muted;       // the kiosk's "stop listening"
 static volatile bool s_button_muted;      // K2 on this board, kept in NVS
 #define MUTED() (s_house_muted || s_button_muted)   // send silence
 static TaskHandle_t s_event_task;
+#define EVENT_MUTE    BIT0             // event task notification bits
+#define EVENT_LEVELS  BIT1
 static i2c_master_bus_handle_t s_i2c;
 static char s_state[16] = "idle";
 static volatile bool s_here;              // this room has the current turn
@@ -162,7 +173,7 @@ static esp_codec_dev_handle_t mic_start(void)
     ESP_ERROR_CHECK(i2s_new_channel(&chan_cfg, NULL, &rx));
     i2s_std_config_t std_cfg = {
         .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(SAMPLE_RATE),
-        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO),
+        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_32BIT, I2S_SLOT_MODE_STEREO),
         .gpio_cfg = {
             .mclk = PIN_I2S_MCLK,
             .bclk = PIN_I2S_BCLK,
@@ -182,11 +193,11 @@ static esp_codec_dev_handle_t mic_start(void)
         .bus_handle = s_i2c,
     };
     const audio_codec_ctrl_if_t *ctrl_if = audio_codec_new_i2c_ctrl(&ctrl_cfg);
-    // MIC1/MIC2 are the two physical mics; MIC3 is the speaker loopback
-    // (an echo reference for AEC, unused while the satellite has no speaker).
+    // All four inputs, as Waveshare's speech demo does: two mics, the
+    // speaker loopback (an echo reference for later) and one unused.
     es7210_codec_cfg_t es7210_cfg = {
         .ctrl_if = ctrl_if,
-        .mic_selected = ES7210_SEL_MIC1 | ES7210_SEL_MIC2,
+        .mic_selected = ES7210_SEL_MIC1 | ES7210_SEL_MIC2 | ES7210_SEL_MIC3 | ES7210_SEL_MIC4,
     };
     const audio_codec_if_t *codec_if = es7210_codec_new(&es7210_cfg);
     esp_codec_dev_cfg_t dev_cfg = {
@@ -201,8 +212,8 @@ static esp_codec_dev_handle_t mic_start(void)
     }
     esp_codec_dev_sample_info_t fs = {
         .sample_rate = SAMPLE_RATE,
-        .channel = 2,
-        .bits_per_sample = 16,
+        .channel = 2,           // two 32-bit slots = four 16-bit channels
+        .bits_per_sample = 32,
     };
     ESP_ERROR_CHECK(esp_codec_dev_open(mic, &fs) == ESP_CODEC_DEV_OK ? ESP_OK : ESP_FAIL);
     esp_codec_dev_set_in_gain(mic, MIC_GAIN_DB);
@@ -210,22 +221,44 @@ static esp_codec_dev_handle_t mic_start(void)
     return mic;
 }
 
+// Per-channel levels for the LEVELS report.
+static char s_levels[96];
+
 static void mic_task(void *arg)
 {
     esp_codec_dev_handle_t mic = arg;
-    static int16_t stereo[FRAME_SAMPLES * 2];
+    static int16_t quad[FRAME_SAMPLES * ADC_CHANNELS];
     static int16_t mono[FRAME_SAMPLES];
+    double sumsq[ADC_CHANNELS] = {0};
+    int peak[ADC_CHANNELS] = {0};
+    int frames = 0;
     while (true) {
-        if (esp_codec_dev_read(mic, stereo, sizeof(stereo)) != ESP_CODEC_DEV_OK) {
+        if (esp_codec_dev_read(mic, quad, sizeof(quad)) != ESP_CODEC_DEV_OK) {
             ESP_LOGW(TAG, "mic read failed");
             vTaskDelay(pdMS_TO_TICKS(100));
             continue;
         }
-        if (MUTED()) {
-            memset(mono, 0, sizeof(mono));   // keeps the stream (and stall checks) alive
-        } else {
-            for (int i = 0; i < FRAME_SAMPLES; i++) {
-                mono[i] = (int16_t)(((int32_t)stereo[2 * i] + stereo[2 * i + 1]) / 2);
+        for (int i = 0; i < FRAME_SAMPLES; i++) {
+            const int16_t *f = &quad[ADC_CHANNELS * i];
+            mono[i] = MUTED() ? 0 : (int16_t)(((int32_t)f[MIC_A] + f[MIC_B]) / 2);
+            for (int c = 0; c < ADC_CHANNELS && LEVELS_EVERY_S; c++) {
+                sumsq[c] += (double)f[c] * f[c];
+                int a = f[c] < 0 ? -f[c] : f[c];
+                peak[c] = a > peak[c] ? a : peak[c];
+            }
+        }
+        if (LEVELS_EVERY_S && ++frames >= LEVELS_EVERY_S * SAMPLE_RATE / FRAME_SAMPLES) {
+            int n = 0;
+            for (int c = 0; c < ADC_CHANNELS; c++) {
+                double rms = sqrt(sumsq[c] / (frames * FRAME_SAMPLES));
+                n += snprintf(&s_levels[n], sizeof(s_levels) - n, " %.0f/%.0f",
+                              20 * log10(rms / 32768 + 1e-9), 20 * log10(peak[c] / 32768.0 + 1e-9));
+                sumsq[c] = 0;
+                peak[c] = 0;
+            }
+            frames = 0;
+            if (s_event_task) {
+                xTaskNotify(s_event_task, EVENT_LEVELS, eSetBits);
             }
         }
         // Never block: if the network is behind, drop this frame.
@@ -478,7 +511,7 @@ static void ring_task(void *arg)
                     save_button_mute();
                     ESP_LOGI(TAG, "mute button: living-room mic %s", s_button_muted ? "muted" : "on");
                     if (s_event_task) {
-                        xTaskNotifyGive(s_event_task);
+                        xTaskNotify(s_event_task, EVENT_MUTE, eSetBits);
                     }
                 }
             }
@@ -487,8 +520,9 @@ static void ring_task(void *arg)
     }
 }
 
-// Tell taco-voice about the mute button, on a short connection of its own.
-static bool send_event(void)
+// Tell taco-voice about the mute button (and channel levels), on a short
+// connection of its own.
+static bool send_event(const char *what)
 {
     int sock = tcp_open();
     if (sock < 0) {
@@ -496,8 +530,8 @@ static bool send_event(void)
     }
     struct timeval tv = {.tv_sec = 5};
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    char line[160];
-    snprintf(line, sizeof(line), "TACO-EVENT %s %s MUTE %s\n", SAT_NAME, SAT_TOKEN, s_button_muted ? "on" : "off");
+    char line[192];
+    snprintf(line, sizeof(line), "TACO-EVENT %s %s %s\n", SAT_NAME, SAT_TOKEN, what);
     bool ok = send_all(sock, (const uint8_t *)line, strlen(line)) && recv_line(sock, line, sizeof(line))
               && strcmp(line, "OK") == 0;
     close(sock);
@@ -506,14 +540,22 @@ static bool send_event(void)
 
 static void event_task(void *arg)
 {
-    bool pending = true;   // report the button once at boot, too
+    uint32_t todo = EVENT_MUTE;   // report the button once at boot, too
     while (true) {
-        if (!pending) {
-            ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-        }
+        uint32_t bits = 0;
+        xTaskNotifyWait(0, UINT32_MAX, &bits, todo ? 0 : portMAX_DELAY);
+        todo |= bits;
         xEventGroupWaitBits(s_wifi, WIFI_UP, pdFALSE, pdTRUE, portMAX_DELAY);
-        pending = !send_event();
-        if (pending) {
+        if ((todo & EVENT_MUTE) && send_event(s_button_muted ? "MUTE on" : "MUTE off")) {
+            todo &= ~EVENT_MUTE;
+        }
+        if (todo & EVENT_LEVELS) {
+            char what[112];
+            snprintf(what, sizeof(what), "LEVELS%s", s_levels);
+            send_event(what);              // a missed report doesn't matter
+            todo &= ~EVENT_LEVELS;
+        }
+        if (todo) {
             vTaskDelay(pdMS_TO_TICKS(5000));   // Taco not there yet; try again
         }
     }
