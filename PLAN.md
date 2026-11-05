@@ -237,3 +237,34 @@ A common `TTSEngine` interface streams sentence by sentence, so speech starts be
     chime plays in both rooms: on the satellite, and on the kitchen speaker
     as today.
   - Depends on the back channel from the item above, so build that first.
+- **Living-room satellite: on-board speech front end** (queued 2026-11-05).
+  The firmware averages MIC1 and MIC2, so it can't favour the speaker's
+  direction over the TV. The 2026-11-05 wake analysis showed TV noise
+  pulling real "Hey Taco" scores down to 0.1-0.3.
+  - Run ESP-SR's AFE on the board, with its own wake word (WakeNet) off:
+    two-mic beamforming / source separation plus noise suppression, giving
+    the mono 16 kHz stream taco-voice already expects. Once the speaker
+    item lands, feed MIC3 (the speaker loopback) in as the AEC reference.
+  - Needs PSRAM. It isn't enabled in `sdkconfig.defaults` today; confirm
+    the board's module (ESP32-S3R8, 8 MB?) and turn it on.
+  - Expect the audio to change: levels and spectrum will differ from what
+    the wake model, verifier and tuning were fitted to. Make the AFE
+    switchable at run time (a control line, with the setting kept in NVS),
+    and report it in the handshake so clips record `afe: on|off`. Then:
+    - A/B the same TV-on scenes with the AFE on and off, using the mix
+      replay from 2026-11-05 as a reference.
+    - Retrain the verifier on AFE clips, or keep both kinds in its
+      training set.
+    - Re-check `local_priority_db` / `local_listen_db` (the satellite's
+      level relative to the kitchen will move), `satellite_vad_aggressiveness`
+      and `satellite_lag_s` (the AFE adds latency).
+    - Keep the AFE's AGC off at first, because the kitchen-priority margin
+      relies on raw levels.
+  - Watch CPU and heat on the ESP32-S3 with the AFE and Wi-Fi together.
+    Audio drops show up as `mic 'living room': no audio` on the Pi.
+
+  **Build order for the satellite items, with one USB flash:** (1) OTA
+  partition layout and pull-from-Pi updates, so everything after it ships
+  over Wi-Fi; (2) the control back channel; (3) the light and mute
+  button; (4) the AFE behind its switch, then tuning; (5) speaker replies,
+  turning on AEC with the MIC3 reference.
