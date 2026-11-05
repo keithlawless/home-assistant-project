@@ -91,4 +91,6 @@ At boot and every 15 minutes the board asks taco-voice, on the satellite port wi
 
 A new image is on trial. Once it has streamed to Taco for 10 s, it's kept (`firmware <version> confirmed` on the monitor). If it crashes, or doesn't reach Taco within 5 minutes, the board goes back to the previous image and won't take that version again. Deploy a fixed build (any new version) to try again.
 
+A reset while an image is still on trial (its first few seconds after an update) also counts as a failure and rolls it back. So after an update, give it about 30 s before pressing **RESET**.
+
 For another satellite, pass its name: `deploy/satellite-ota.sh "bedroom"` serves `/srv/taco/satellite/bedroom.bin`, or set `firmware = "..."` in its `[[audio.satellites]]` entry.
