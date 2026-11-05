@@ -135,7 +135,8 @@ class NetworkMicrophone(_FrameSource):
     connection, so the caller can resend the current state.
 
     A satellite reports its own mute button the same way, on a short
-    connection: `TACO-EVENT <name> <token> MUTE on|off`, answered `OK`.
+    connection: `TACO-EVENT <name> <token> MUTE on|off`, answered `OK`
+    (or `LEVELS ...`, per-channel levels, logged for diagnosis).
     While muted it streams silence, so this is only for the log.
 
     Firmware updates use the same port, token and allow list: a satellite
@@ -257,6 +258,9 @@ class NetworkMicrophone(_FrameSource):
             if muted != self.button_muted:
                 log.info("satellite %r: mute button %s", self.name, "on (mic muted)" if muted else "off")
             self.button_muted = muted
+        elif words[:1] == ["LEVELS"]:
+            # Per-channel "rms/peak" dBFS, for checking the board's channel layout.
+            log.info("satellite %r: channel levels (rms/peak dBFS) %s", self.name, " ".join(words[1:]))
         else:
             log.warning("satellite %r: unknown event %r", self.name, " ".join(words))
 
