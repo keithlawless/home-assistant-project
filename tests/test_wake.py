@@ -166,41 +166,77 @@ def test_level_db_is_loudest_recent_frame():
     assert t.level_db() == -90.0
 
 
-def _loop_with(local_level, satellite_level, limit=10.0):
-    from taco.voice.audio import NetworkMicrophone
+class FakeMic:
+    """Hands out queued frames, like Microphone.read_nowait."""
+
+    def __init__(self, name, frames=()):
+        self.name = name
+        self.frames = list(frames)
+
+    def read_nowait(self):
+        return self.frames.pop(0) if self.frames else None
+
+
+def _loop_with(local_level, satellite_level, limit=10.0, kitchen_scores=(0.0,)):
     from taco.voice.main import VoiceLoop
 
     loop = VoiceLoop.__new__(VoiceLoop)   # no models or devices
-    loop.cfg = {"wake": {"local_priority_db": limit}}
+    loop.cfg = {"wake": {"local_priority_db": limit, "local_defer_s": 0.8, "local_listen_db": 24.0}}
     loop.clips = None
-    kitchen, living = Scripted([0.0]), Scripted([0.9])
-    kitchen.detect(np.full(FRAME_SAMPLES, local_level, dtype=np.int16))
-    living.detect(np.full(FRAME_SAMPLES, satellite_level, dtype=np.int16))
-    satellite = NetworkMicrophone.__new__(NetworkMicrophone)
-    satellite.name = "living room"
-    loop.listeners = [(Microphone(), kitchen), (satellite, living)]
-    return loop, satellite, living
+    loop.muted = False
+    loop._deferred = None
+    kitchen = Scripted(list(kitchen_scores) + [0.0] * 20)
+    living = Scripted([0.9] + [0.0] * 20)
+    mic = FakeMic("kitchen", [np.full(FRAME_SAMPLES, local_level, dtype=np.int16)])
+    satellite = FakeMic("living room", [np.full(FRAME_SAMPLES, satellite_level, dtype=np.int16)])
+    loop.listeners = [(mic, kitchen), (satellite, living)]
+    return loop, mic, satellite
 
 
-def test_satellite_wake_ignored_when_kitchen_much_louder(caplog):
+def test_satellite_wake_waits_then_fires_when_kitchen_stays_quiet(caplog):
     caplog.set_level(logging.INFO, logger="taco.voice")
-    loop, satellite, living = _loop_with(4000, 300)   # ~22 dB
-    assert loop._heard_locally(satellite, living, 0.9)
+    loop, mic, satellite = _loop_with(1600, 300)   # ~15 dB: living-room speech
+    assert loop._detect_wake(now=0.0) is None
+    assert "waits: kitchen heard it 15 dB louder" in caplog.records[-1].message
+    satellite.frames.append(FRAME)   # request audio stays buffered meanwhile
+    mic.frames.append(FRAME)
+    assert loop._detect_wake(now=0.5) is None
+    assert satellite.frames == [FRAME]
+    score, detector, listener = loop._detect_wake(now=0.9)
+    assert score == 0.9 and detector[0] is satellite and listener[0] is satellite
+    assert loop._deferred is None
+
+
+def test_kitchen_wins_when_it_wakes_too(caplog):
+    caplog.set_level(logging.INFO, logger="taco.voice")
+    loop, mic, satellite = _loop_with(4000, 300, kitchen_scores=(0.0, 0.8))   # ~22 dB
+    assert loop._detect_wake(now=0.0) is None
+    mic.frames.append(FRAME)
+    score, detector, listener = loop._detect_wake(now=0.3)
+    assert score == 0.8 and detector[0] is mic and listener[0] is mic
     assert "ignored: kitchen heard it 22 dB louder" in caplog.records[-1].message
-    assert living.level_db() == -90.0   # reset
+    assert loop._deferred is None
 
 
-def test_satellite_wake_kept_when_speech_is_in_its_room():
-    loop, satellite, living = _loop_with(300, 300)
-    assert not loop._heard_locally(satellite, living, 0.9)
-    loop, satellite, living = _loop_with(4000, 300, limit=0)   # off
-    assert not loop._heard_locally(satellite, living, 0.9)
+def test_fallback_listens_on_kitchen_when_far_louder():
+    loop, mic, satellite = _loop_with(8000, 300)   # ~28 dB: the speaker is in the kitchen
+    assert loop._detect_wake(now=0.0) is None
+    score, detector, listener = loop._detect_wake(now=1.0)
+    assert detector[0] is satellite and listener[0] is mic
 
 
-def test_local_mic_never_ignored():
-    loop, _, _ = _loop_with(4000, 300)
-    mic, wake = loop.listeners[0]
-    assert not loop._heard_locally(mic, wake, 0.9)
+def test_satellite_wake_fires_at_once_when_speech_is_in_its_room():
+    loop, mic, satellite = _loop_with(300, 300)
+    assert loop._detect_wake(now=0.0)[1][0] is satellite
+    loop, mic, satellite = _loop_with(4000, 300, limit=0)   # off
+    assert loop._detect_wake(now=0.0)[1][0] is satellite
+
+
+def test_local_mic_never_waits():
+    loop, mic, satellite = _loop_with(4000, 300, kitchen_scores=(0.8,))
+    satellite.frames.clear()
+    assert loop._detect_wake(now=0.0)[1][0] is mic
+    assert loop._deferred is None
 
 
 def test_enforced_verifier_rescues_low_scoring_wake():

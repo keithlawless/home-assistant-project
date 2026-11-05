@@ -47,17 +47,26 @@ DEFAULTS: dict = {
         #   offset = 0.1    # added to the threshold
         #   patience = 3    # overrides [wake] patience
         "rooms": {},
-        # Speech in the kitchen also reaches a satellite in the next room. A
-        # satellite's wake is ignored when the local mic heard the same few
-        # seconds at least this many dB louder (kitchen speech measured 18-35
-        # dB louder on the local mic). 0 = off.
+        # Speech in the kitchen also reaches a satellite in the next room. When
+        # the local mic heard a satellite's wake at least local_priority_db
+        # louder, the satellite waits local_defer_s for the local mic to wake
+        # too, and the local mic wins if it does. If it doesn't, the satellite
+        # wakes after all, so a living-room wake isn't lost when the kitchen
+        # also hears it (TV, or the local mic's higher gain: living-room
+        # speech measured 4-18 dB louder on the local mic, kitchen speech
+        # mostly 21-37). At local_listen_db or more the speaker is surely at
+        # the local mic, so the request is taken from there. 0 = off.
         "local_priority_db": 10.0,
+        "local_defer_s": 0.8,
+        "local_listen_db": 24.0,
         # Keep a short clip of every wake and near miss, for tuning and
         # retraining (taco/voice/clips.py). Near misses are runs that peak at
         # or above near_miss without firing. Oldest clips go past max_clips.
         "save_clips": True,
         "clips_dir": str(TACO_HOME / "wake_clips"),
-        "near_miss": 0.3,
+        # Also the verifier's candidate floor. With TV on, a real "Hey Taco"
+        # often peaks at 0.2-0.3 while the verifier still accepts it.
+        "near_miss": 0.2,
         "max_clips": 1000,
         # Second-stage check, trained on this household's voices
         # (wakeword/verifier/README.md). Every candidate (a run at or above

@@ -133,6 +133,7 @@ class VoiceLoop:
         self.clips = ClipRecorder(w["clips_dir"], w["max_clips"]) if w["save_clips"] else None
         self._wake_clip: dict | None = None   # the current wake, until its request is heard
         self.active = self.listeners[0]   # the (mic, wake) handling the current turn
+        self._deferred: dict | None = None   # a satellite wake waiting on the local mic
         self.speaker = Speaker(audio["output_device"])
         self.stt = Transcriber(cfg["stt"]["model"], cfg["stt"]["compute_type"],
                                build_vocabulary(None, cfg["stt"]["vocabulary"]))
@@ -258,12 +259,12 @@ class VoiceLoop:
             self.ready.clear()   # before draining, so a frame arriving mid-drain re-sets it
             if (heard := self._detect_wake()) is None:
                 continue
-            score, self.active = heard
-            mic, wake = self.active
+            score, (mic, wake), self.active = heard
             verified = wake.last_verified
-            log.info("wake word (%.2f, %s)%s%s", score, mic.name,
+            log.info("wake word (%.2f, %s)%s%s%s", score, mic.name,
                      f", {wake.verdict(verified)}" if verified is not None else "",
-                     "" if mic is self.listeners[0][0] else f", local mic {self._local_margin(wake):+.0f} dB")
+                     "" if mic is self.listeners[0][0] else f", local mic {self._local_margin(wake):+.0f} dB",
+                     "" if self.active[0] is mic else f", listening on {self.active[0].name}")
             if self.clips:
                 audio, scores = wake.recent()
                 self._wake_clip = {"room": mic.name, "audio": audio, "info": {
@@ -287,34 +288,59 @@ class VoiceLoop:
         a satellite's wake model did."""
         return self.listeners[0][1].level_db() - wake.level_db()
 
-    def _heard_locally(self, mic, wake: WakeWord, score: float) -> bool:
+    def _defer_to_local(self, mic, wake: WakeWord, score: float, now: float) -> bool:
         """A satellite also hears speech in the kitchen, and shouldn't take
-        the turn: drop its wake when the local mic heard that moment much
-        louder ([wake] local_priority_db)."""
+        the turn: hold its wake when the local mic heard that moment much
+        louder ([wake] local_priority_db), to see if the local mic wakes too."""
         limit = self.cfg["wake"]["local_priority_db"]
         if mic is self.listeners[0][0] or not limit:
             return False
         margin = self._local_margin(wake)
         if margin < limit:
             return False
-        log.info("wake word (%.2f, %s) ignored: %s heard it %.0f dB louder",
+        log.info("wake word (%.2f, %s) waits: %s heard it %.0f dB louder",
                  score, mic.name, self.listeners[0][0].name, margin)
+        self._deferred = {"score": score, "listener": (mic, wake), "margin": margin,
+                          "until": now + self.cfg["wake"]["local_defer_s"]}
+        return True
+
+    def _drop_deferred(self) -> None:
+        """The local mic woke too: it takes the turn, and the satellite's wake
+        is kept as a near miss."""
+        d, self._deferred = self._deferred, None
+        mic, wake = d["listener"]
+        log.info("wake word (%.2f, %s) ignored: %s heard it %.0f dB louder",
+                 d["score"], mic.name, self.listeners[0][0].name, d["margin"])
         if self.clips:
             audio, scores = wake.recent()
             self.clips.save("near_miss", mic.name, audio, {
-                "peak": round(score, 3), "threshold": round(wake.threshold, 3),
+                "peak": round(d["score"], 3), "threshold": round(wake.threshold, 3),
                 "patience": wake.patience, "scores": scores,
-                "ignored": f"local mic {margin:.0f} dB louder",
+                "ignored": f"local mic {d['margin']:.0f} dB louder",
                 **_verified_info(wake.last_verified),
             })
         wake.reset()
-        return True
 
-    def _detect_wake(self):
+    def _release_deferred(self):
+        """The local mic didn't wake in time, so the satellite wakes after all.
+        Returns (score, detector, listener); the request comes from the local
+        mic when it heard the speaker far louder ([wake] local_listen_db)."""
+        d, self._deferred = self._deferred, None
+        listener = d["listener"]
+        if d["margin"] >= self.cfg["wake"]["local_listen_db"]:
+            listener = self.listeners[0]
+        return d["score"], d["listener"], listener
+
+    def _detect_wake(self, now: float | None = None):
         """Feed every mic's buffered frames to its wake model. Returns
-        (score, (mic, wake)) for the strongest detection, or None."""
+        (score, (mic, wake) that heard it, (mic, wake) to take the request
+        from) for the strongest detection, or None."""
+        now = time.monotonic() if now is None else now
+        held = self._deferred["listener"] if self._deferred else None
         best = None
         for mic, wake in self.listeners:
+            if held and held[0] is mic:
+                continue   # its audio stays buffered for the request
             while (frame := mic.read_nowait()) is not None:
                 if self.muted:
                     continue   # frames are still drained so unmuting starts fresh
@@ -335,12 +361,20 @@ class VoiceLoop:
                             "scores": miss.scores, **_verified_info(miss.verified),
                             **({} if local else {"local_margin_db": margin}),
                         })
-                if score is not None and self._heard_locally(mic, wake, score):
+                if score is not None and self._defer_to_local(mic, wake, score, now):
                     break
                 if score is not None:
                     if best is None or score > best[0]:
-                        best = (score, (mic, wake))
+                        best = (score, (mic, wake), (mic, wake))
                     break   # leave the rest of this mic's audio for the request
+        if self._deferred:
+            if self.muted:
+                self._deferred["listener"][1].reset()
+                self._deferred = None
+            elif best is not None and best[1][0] is self.listeners[0][0]:
+                self._drop_deferred()
+            elif best is None and now >= self._deferred["until"]:
+                best = self._release_deferred()
         return best
 
     def _watch_mics(self) -> None:
@@ -361,6 +395,7 @@ class VoiceLoop:
         self.clips.save("wake", clip["room"], clip["audio"], clip["info"])
 
     def _reset_wake(self) -> None:
+        self._deferred = None
         for _, wake in self.listeners:
             wake.reset()
 

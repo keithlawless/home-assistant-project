@@ -3,7 +3,7 @@
 A second check on "Hey Taco", in the style of smart speakers that pair an
 easily triggered first stage with a stricter second one. The wake model
 (`hey_taco.onnx`) marks *candidates*: any run of scores reaching
-`[wake] near_miss` (0.3). The verifier, a small logistic regression over the
+`[wake] near_miss` (0.2). The verifier, a small logistic regression over the
 same audio features, trained on this household's voices, then scores each
 candidate. It learns what *your* "Hey Taco" sounds like, so it can accept a
 real wake the wake model scored low, and reject TV speech the wake model
