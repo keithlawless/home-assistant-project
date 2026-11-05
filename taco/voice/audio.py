@@ -20,6 +20,7 @@ import ipaddress
 import logging
 import queue
 import socket
+import struct
 import subprocess
 import threading
 import time
@@ -127,6 +128,12 @@ class NetworkMicrophone(_FrameSource):
     connection is live at a time: a new one (the satellite restarting)
     replaces the old, which may be a half-open socket nobody will close.
 
+    Taco also writes short control lines down the live connection, which
+    the satellite reads between frames (older firmware ignores them):
+    `STATE <idle|listening|thinking|speaking> [here|elsewhere]`, `MUTE on|off`
+    and `UPDATE` (check for firmware now). `on_connect` runs for each new
+    connection, so the caller can resend the current state.
+
     Firmware updates use the same port, token and allow list: a satellite
     asks with `TACO-OTA <name> <token> <running version>` and gets back
     `NONE`, or `IMAGE <size> <sha256> <version>` and the image itself, when
@@ -138,7 +145,7 @@ class NetworkMicrophone(_FrameSource):
 
     def __init__(self, name: str, port: int, token: str, allow: list[str] | None = None,
                  host: str = "0.0.0.0", ready: threading.Event | None = None,
-                 firmware: str | Path | None = None):
+                 firmware: str | Path | None = None, on_connect=None):
         super().__init__(name, ready)
         if not token:
             raise ValueError(f"satellite {name!r} needs a token")
@@ -150,11 +157,18 @@ class NetworkMicrophone(_FrameSource):
         self._conn: socket.socket | None = None
         self._server: socket.socket | None = None
         self.firmware = Path(firmware) if firmware else None
+        self._fw_mtime: float | None = None
+        self.on_connect = on_connect
+        # Control lines go out on their own thread, so a slow socket never
+        # holds up the voice loop.
+        self._out: queue.Queue[str] = queue.Queue(maxsize=50)
 
     def start(self) -> None:
         self._server = socket.create_server((self.host, self.port))
         self.port = self._server.getsockname()[1]   # when bound to port 0 (tests)
         threading.Thread(target=self._accept, daemon=True, name=f"sat-{self.name}").start()
+        threading.Thread(target=self._send_lines, daemon=True, name=f"sat-{self.name}-out").start()
+        self._fw_mtime = self._firmware_mtime()
         log.info("satellite %r: listening on port %d", self.name, self.port)
 
     @property
@@ -164,6 +178,44 @@ class NetworkMicrophone(_FrameSource):
     @property
     def live(self) -> bool:
         return self.connected   # a disconnect is logged on its own
+
+    def send_line(self, line: str) -> None:
+        """Queue a control line for the live connection; dropped if there's
+        none, or if the queue is full."""
+        if self._conn is None:
+            return
+        try:
+            self._out.put_nowait(line)
+        except queue.Full:
+            pass
+
+    def _send_lines(self) -> None:
+        while True:
+            line = self._out.get()
+            conn = self._conn
+            if conn is None:
+                continue
+            try:
+                conn.sendall(f"{line}\n".encode())
+            except OSError as e:
+                log.info("satellite %r: control line %r not sent: %s", self.name, line, e)
+
+    def _firmware_mtime(self) -> float | None:
+        try:
+            return self.firmware.stat().st_mtime if self.firmware else None
+        except OSError:
+            return None
+
+    def check_firmware(self) -> None:
+        """Tell the satellite to update as soon as a new image lands (rather
+        than at its next 15-minute check)."""
+        mtime = self._firmware_mtime()
+        if mtime == self._fw_mtime:
+            return
+        self._fw_mtime = mtime
+        if mtime is not None and self.connected:
+            log.info("satellite %r: new firmware image; asking it to update", self.name)
+            self.send_line("UPDATE")
 
     def _allowed(self, ip: str) -> bool:
         if not self._allow:
@@ -218,12 +270,16 @@ class NetworkMicrophone(_FrameSource):
                 return   # never touches the live audio connection
             conn.settimeout(None)
             conn.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            # Control lines give up rather than block on a stuck satellite.
+            conn.setsockopt(socket.SOL_SOCKET, socket.SO_SNDTIMEO, struct.pack("ll", 2, 0))
             with self._lock:
                 self.last_frame = time.monotonic()   # don't count the time it was away
                 old, self._conn = self._conn, conn
             if old:
                 _close(old)
             log.info("satellite %r: connected from %s", self.name, ip)
+            if self.on_connect:
+                self.on_connect(self)
             stream = conn.makefile("rb")
             frame_bytes = FRAME_SAMPLES * 2
             while len(chunk := stream.read(frame_bytes)) == frame_bytes:

@@ -157,3 +157,95 @@ def test_update_check_leaves_audio_connection_alone(tmp_path):
         ask_update(mic, "v1")
         sock.sendall(FRAME.tobytes())
         assert np.array_equal(mic.read(timeout=2), FRAME)
+
+
+def read_lines(sock, n, timeout=2.0):
+    sock.settimeout(timeout)
+    data = b""
+    while data.count(b"\n") < n:
+        chunk = sock.recv(4096)
+        if not chunk:
+            break
+        data += chunk
+    return data.decode().splitlines()
+
+
+def test_control_lines_reach_the_satellite():
+    mic = start_mic()
+    with connect(mic) as sock:
+        wait_for(lambda: mic.connected)
+        mic.send_line("STATE listening here")
+        mic.send_line("MUTE on")
+        assert read_lines(sock, 2) == ["STATE listening here", "MUTE on"]
+
+
+def test_control_lines_dropped_without_a_satellite():
+    mic = start_mic()
+    mic.send_line("STATE idle")   # nobody connected: no error, nothing queued
+    with connect(mic) as sock:
+        wait_for(lambda: mic.connected)
+        mic.send_line("MUTE off")
+        assert read_lines(sock, 1) == ["MUTE off"]
+
+
+def test_on_connect_runs_for_each_connection():
+    seen = []
+    mic = start_mic(on_connect=lambda m: (seen.append(m), m.send_line("STATE idle")))
+    with connect(mic) as sock:
+        assert read_lines(sock, 1) == ["STATE idle"]
+    with connect(mic) as sock:
+        assert read_lines(sock, 1) == ["STATE idle"]
+    assert seen == [mic, mic]
+
+
+def test_new_firmware_image_asks_satellite_to_update(tmp_path):
+    import os
+    fw = tmp_path / "fw.bin"
+    fw.write_bytes(fake_image("v1"))
+    mic = start_mic(firmware=fw)
+    with connect(mic) as sock:
+        wait_for(lambda: mic.connected)
+        mic.check_firmware()            # unchanged since start: nothing sent
+        fw.write_bytes(fake_image("v2"))
+        os.utime(fw, (time.time() + 5, time.time() + 5))
+        mic.check_firmware()
+        mic.check_firmware()            # only once per new image
+        mic.send_line("END")
+        assert read_lines(sock, 2) == ["UPDATE", "END"]
+
+
+class FakeSat:
+    def __init__(self):
+        self.lines = []
+
+    def send_line(self, line):
+        self.lines.append(line)
+
+
+def _loop_with_satellite():
+    from taco.voice.main import VoiceLoop
+
+    loop = VoiceLoop.__new__(VoiceLoop)   # no models or devices
+    sat = FakeSat()
+    loop.listeners = [(object(), None), (sat, None)]
+    loop.active = loop.listeners[0]
+    loop.state, loop.muted = "idle", False
+    loop.events = type("E", (), {"send": lambda self, *a, **k: None})()
+    loop._satellites = lambda: [sat]
+    return loop, sat
+
+
+def test_state_lines_say_whose_turn_it_is():
+    loop, sat = _loop_with_satellite()
+    loop._set_state("listening")
+    loop.active = loop.listeners[1]
+    loop._set_state("thinking")
+    loop._set_state("idle")
+    assert sat.lines == ["STATE listening elsewhere", "STATE thinking here", "STATE idle"]
+
+
+def test_reconnecting_satellite_gets_mute_and_state():
+    loop, sat = _loop_with_satellite()
+    loop.muted, loop.state = True, "speaking"
+    loop._sync_satellite(sat)
+    assert sat.lines == ["MUTE on", "STATE speaking elsewhere"]
