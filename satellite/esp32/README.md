@@ -1,6 +1,6 @@
 # ESP32 mic satellite (Waveshare ESP32-S3-AUDIO-Board)
 
-This firmware turns the Waveshare ESP32-S3-AUDIO-Board into a Taco mic satellite. It mixes the board's two mics to mono and streams them to taco-voice over Wi-Fi. It uses the same protocol as `../taco_satellite.py`, so nothing changes on the Pi side. The speaker, LED ring and buttons aren't used yet.
+This firmware turns the Waveshare ESP32-S3-AUDIO-Board into a Taco mic satellite. It mixes the board's two mics to mono and streams them to taco-voice over Wi-Fi. It uses the same protocol as `../taco_satellite.py`, so nothing changes on the Pi side. After the first USB flash, updates go over Wi-Fi (see [Firmware updates over Wi-Fi](#firmware-updates-over-wi-fi)). The speaker, LED ring and buttons aren't used yet.
 
 ## One-time setup on the Mac
 ```sh
@@ -48,6 +48,12 @@ For a stable setup, give the board a DHCP reservation in the router and narrow `
    ```
 3. If the upload can't find the board, hold **BOOT**, tap **RESET**, release **BOOT**, and run the upload again.
 
+A board flashed with the old single-app layout needs one USB flash to switch. That first flash with the OTA layout should start from a clean chip, because the old Wi-Fi calibration data sits where the OTA state now goes:
+```sh
+pio run -t erase && pio run -t upload
+```
+NVS holds only Wi-Fi calibration (credentials are compiled in), so nothing is lost.
+
 ## 4. Check it
 The monitor should show:
 ```
@@ -70,7 +76,19 @@ If the monitor shows `can't reach Taco at 192.168.4.239:10700; retrying`, nothin
 - Possible next steps on this board:
   - a status/listening light on the LED ring
   - the buttons as a mic mute
-  - over-the-air updates
   - playing replies on its speaker (the ES7210 has a speaker loopback channel that echo cancellation could use)
 
   These are planned in `PLAN.md` under "Future features".
+
+## Firmware updates over Wi-Fi
+After one USB flash with this layout (`partitions.csv`: two 4 MB app slots, plus 6 MB kept for speech models), new builds go over Wi-Fi:
+```sh
+deploy/satellite-ota.sh            # from the repo root; builds and copies to the Pi
+```
+The script stamps a unique version (date, commit, and "+" for uncommitted changes), builds it, and puts the image in `/srv/taco/satellite/living_room.bin` on the Pi, mode 0600 because it holds the Wi-Fi password and token. No restart is needed.
+
+At boot and every 15 minutes the board asks taco-voice, on the satellite port with its token, whether there's a build with a different version. If there is, it downloads it, checks its SHA-256, writes the other app slot and restarts. Press **RESET** to check straight away. The taco-voice log shows `sending firmware <version>`.
+
+A new image is on trial. Once it has streamed to Taco for 10 s, it's kept (`firmware <version> confirmed` on the monitor). If it crashes, or doesn't reach Taco within 5 minutes, the board goes back to the previous image and won't take that version again. Deploy a fixed build (any new version) to try again.
+
+For another satellite, pass its name: `deploy/satellite-ota.sh "bedroom"` serves `/srv/taco/satellite/bedroom.bin`, or set `firmware = "..."` in its `[[audio.satellites]]` entry.

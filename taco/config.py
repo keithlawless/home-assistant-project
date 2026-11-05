@@ -31,6 +31,7 @@ DEFAULTS: dict = {
         #   port = 10700
         #   token = "..."               # shared secret; keep it out of the repo
         #   allow = ["192.168.4.0/24"]  # peers allowed to connect
+        #   firmware = "..."            # OTA image; default /srv/taco/satellite/<name>.bin
         "satellites": [],
     },
     "wake": {

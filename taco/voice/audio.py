@@ -14,6 +14,7 @@ next sentence can be synthesized while the current one plays.
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import ipaddress
 import logging
@@ -22,6 +23,7 @@ import socket
 import subprocess
 import threading
 import time
+from pathlib import Path
 
 import numpy as np
 
@@ -124,12 +126,19 @@ class NetworkMicrophone(_FrameSource):
     `TACO <name> <token>`, then streams raw 16 kHz mono s16 audio. Only one
     connection is live at a time: a new one (the satellite restarting)
     replaces the old, which may be a half-open socket nobody will close.
+
+    Firmware updates use the same port, token and allow list: a satellite
+    asks with `TACO-OTA <name> <token> <running version>` and gets back
+    `NONE`, or `IMAGE <size> <sha256> <version>` and the image itself, when
+    `firmware` holds a build with a different version. The image has the
+    Wi-Fi password and token compiled in, so it is only ever served here.
     """
 
     sample_rate = 16000   # fixed by the satellite protocol
 
     def __init__(self, name: str, port: int, token: str, allow: list[str] | None = None,
-                 host: str = "0.0.0.0", ready: threading.Event | None = None):
+                 host: str = "0.0.0.0", ready: threading.Event | None = None,
+                 firmware: str | Path | None = None):
         super().__init__(name, ready)
         if not token:
             raise ValueError(f"satellite {name!r} needs a token")
@@ -140,6 +149,7 @@ class NetworkMicrophone(_FrameSource):
         self._lock = threading.Lock()
         self._conn: socket.socket | None = None
         self._server: socket.socket | None = None
+        self.firmware = Path(firmware) if firmware else None
 
     def start(self) -> None:
         self._server = socket.create_server((self.host, self.port))
@@ -170,26 +180,42 @@ class NetworkMicrophone(_FrameSource):
             threading.Thread(target=self._serve, args=(conn, ip), daemon=True,
                              name=f"sat-{self.name}-conn").start()
 
-    def _handshake(self, conn: socket.socket) -> bool:
+    def _handshake(self, conn: socket.socket) -> list[str] | None:
+        """The handshake line's words, if the token is right."""
         conn.settimeout(5.0)
         line = b""
         while not line.endswith(b"\n") and len(line) < 256:
             byte = conn.recv(1)
             if not byte:
-                return False
+                return None
             line += byte
         parts = line.decode(errors="replace").split()
-        return (len(parts) == 3 and parts[0] == "TACO"
-                and hmac.compare_digest(parts[2].encode(), self._token.encode()))
+        ok = ((len(parts) == 3 and parts[0] == "TACO") or (len(parts) == 4 and parts[0] == "TACO-OTA"))
+        return parts if ok and hmac.compare_digest(parts[2].encode(), self._token.encode()) else None
+
+    def _serve_update(self, conn: socket.socket, ip: str, running: str) -> None:
+        """Answer a firmware check: the image if its version differs."""
+        image = self.firmware.read_bytes() if self.firmware and self.firmware.is_file() else b""
+        version = image_version(image)
+        if not version or version == running:
+            conn.sendall(b"NONE\n")
+            return
+        log.info("satellite %r: sending firmware %s to %s (running %s)", self.name, version, ip, running)
+        conn.settimeout(60.0)
+        conn.sendall(f"IMAGE {len(image)} {hashlib.sha256(image).hexdigest()} {version}\n".encode())
+        conn.sendall(image)
 
     def _serve(self, conn: socket.socket, ip: str) -> None:
         try:
             if not self._allowed(ip):
                 log.warning("satellite %r: refused %s (not in allow list)", self.name, ip)
                 return
-            if not self._handshake(conn):
+            if not (parts := self._handshake(conn)):
                 log.warning("satellite %r: bad handshake from %s", self.name, ip)
                 return
+            if parts[0] == "TACO-OTA":
+                self._serve_update(conn, ip, parts[3])
+                return   # never touches the live audio connection
             conn.settimeout(None)
             conn.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
             with self._lock:
@@ -212,6 +238,15 @@ class NetworkMicrophone(_FrameSource):
                     self._conn = None
                     log.warning("satellite %r: disconnected", self.name)
             _close(conn)
+
+
+def image_version(image: bytes) -> str | None:
+    """The version in an ESP-IDF app image (its esp_app_desc_t), or None if
+    it isn't one. The descriptor follows the 24-byte image header and the
+    first 8-byte segment header."""
+    if len(image) < 80 or image[0] != 0xE9 or image[32:36] != (0xABCD5432).to_bytes(4, "little"):
+        return None
+    return image[48:80].split(b"\0")[0].decode(errors="replace") or None
 
 
 def _close(conn: socket.socket) -> None:

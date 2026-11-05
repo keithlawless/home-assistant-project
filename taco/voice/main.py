@@ -23,7 +23,7 @@ from typing import Any
 import httpx
 import numpy as np
 
-from taco.config import load_config, read_env_value
+from taco.config import TACO_HOME, load_config, read_env_value
 from taco.voices import DEFAULT_VOICE, PREVIEW_TEXT
 
 from .alarm import AlarmPlayer
@@ -117,6 +117,11 @@ class BargeIn:
             self.wake.reset()
 
 
+def satellite_firmware(name: str) -> str:
+    """Where deploy/satellite-ota.sh puts a satellite's firmware image."""
+    return str(TACO_HOME / "satellite" / f"{name.replace(' ', '_')}.bin")
+
+
 class VoiceLoop:
     def __init__(self, cfg: dict):
         self.cfg = cfg
@@ -124,7 +129,8 @@ class VoiceLoop:
         self.ready = threading.Event()   # any mic has a new frame
         mics = [Microphone(audio["sample_rate"], audio["input_device"], audio["input_name"], self.ready)]
         mics += [
-            NetworkMicrophone(s["name"], s["port"], s["token"], s.get("allow"), ready=self.ready)
+            NetworkMicrophone(s["name"], s["port"], s["token"], s.get("allow"), ready=self.ready,
+                              firmware=s.get("firmware", satellite_firmware(s["name"])))
             for s in audio["satellites"]
         ]
         # openWakeWord keeps a rolling window per stream, so one model per mic.

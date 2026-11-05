@@ -10,6 +10,14 @@
  * mode with the ESP32 as clock master -> mic task (mix to mono) -> stream
  * buffer -> net task -> socket. The two tasks are decoupled so a slow or
  * dropped connection never stalls I2S; audio is simply dropped instead.
+ *
+ * Firmware updates (ota task): at boot and every OTA_CHECK_S the board asks
+ * taco-voice, on the same port, "TACO-OTA <name> <token> <version>". If the
+ * Pi has a different build it streams it, and the board checks its SHA-256,
+ * writes the other app slot and restarts. A new image must stream to Taco
+ * for STREAM_OK_S within OTA_CONFIRM_S of booting, or the board rolls back
+ * to the old one and never takes that version again (a crash rolls back
+ * too, via the bootloader).
  */
 
 #include <string.h>
@@ -28,6 +36,10 @@
 #include "driver/i2c_master.h"
 #include "driver/i2s_std.h"
 #include "lwip/sockets.h"
+#include "esp_ota_ops.h"
+#include "esp_app_desc.h"
+#include "esp_timer.h"
+#include "psa/crypto.h"
 #include "esp_codec_dev.h"
 #include "esp_codec_dev_defaults.h"
 #include "es7210_adc.h"
@@ -50,6 +62,13 @@ static const char *TAG = "taco-sat";
 #define STREAM_BYTES  (FRAME_BYTES * 8)    // ~0.6 s of slack for network hiccups
 
 #define WIFI_UP BIT0
+
+#define OTA_CHECK_S    (15 * 60)   // how often to ask Taco for new firmware
+#define OTA_CONFIRM_S  300         // a new image must reach Taco within this
+#define STREAM_OK_S    10          // ...and stream this long, or it rolls back
+
+static bool s_pending_verify;      // running a new image that hasn't proved itself
+static char s_bad_version[32];     // the image that last rolled back; never retaken
 
 static EventGroupHandle_t s_wifi;
 static StreamBufferHandle_t s_audio;
@@ -184,7 +203,7 @@ static void mic_task(void *arg)
 
 // -- Network --------------------------------------------------------------------
 
-static int taco_connect(void)
+static int tcp_open(void)
 {
     struct addrinfo hints = {.ai_family = AF_INET, .ai_socktype = SOCK_STREAM};
     struct addrinfo *res = NULL;
@@ -209,9 +228,14 @@ static int taco_connect(void)
     // If Taco stops reading, fail the send rather than hang forever.
     struct timeval tv = {.tv_sec = 5};
     setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    return sock;
+}
 
+static int taco_connect(void)
+{
+    int sock = tcp_open();
     const char *hello = "TACO " SAT_NAME " " SAT_TOKEN "\n";
-    if (send(sock, hello, strlen(hello), 0) < 0) {
+    if (sock >= 0 && send(sock, hello, strlen(hello), 0) < 0) {
         close(sock);
         return -1;
     }
@@ -247,7 +271,13 @@ static void net_task(void *arg)
         ESP_LOGI(TAG, "streaming to %s:%d", TACO_HOST, TACO_PORT);
         backoff_ms = 1000;
         xStreamBufferReset(s_audio);   // start live, not with stale audio
+        int64_t since = esp_timer_get_time();
         while (true) {
+            if (s_pending_verify && esp_timer_get_time() - since > STREAM_OK_S * 1000000LL) {
+                esp_ota_mark_app_valid_cancel_rollback();
+                s_pending_verify = false;
+                ESP_LOGI(TAG, "firmware %s confirmed", esp_app_get_description()->version);
+            }
             size_t got = xStreamBufferReceive(s_audio, frame, FRAME_BYTES, pdMS_TO_TICKS(1000));
             if (got == 0) {
                 continue;
@@ -261,6 +291,129 @@ static void net_task(void *arg)
     }
 }
 
+// -- Firmware updates -------------------------------------------------------------
+
+static bool recv_line(int sock, char *line, size_t size)
+{
+    size_t n = 0;
+    while (n + 1 < size) {
+        if (recv(sock, &line[n], 1, 0) != 1) {
+            return false;
+        }
+        if (line[n] == '\n') {
+            line[n] = 0;
+            return true;
+        }
+        n++;
+    }
+    return false;
+}
+
+static void ota_check(void)
+{
+    int sock = tcp_open();
+    if (sock < 0) {
+        return;
+    }
+    struct timeval tv = {.tv_sec = 30};
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    char line[192];
+    snprintf(line, sizeof(line), "TACO-OTA %s %s %s\n", SAT_NAME, SAT_TOKEN,
+             esp_app_get_description()->version);
+    unsigned size = 0;
+    char want[65] = {0}, version[32] = {0};
+    if (!send_all(sock, (const uint8_t *)line, strlen(line)) || !recv_line(sock, line, sizeof(line))
+        || sscanf(line, "IMAGE %u %64s %31s", &size, want, version) != 3) {
+        close(sock);   // "NONE", or Taco too old to know the question
+        return;
+    }
+    if (strcmp(version, s_bad_version) == 0) {
+        ESP_LOGW(TAG, "firmware %s rolled back before; not taking it again", version);
+        close(sock);
+        return;
+    }
+    const esp_partition_t *slot = esp_ota_get_next_update_partition(NULL);
+    esp_ota_handle_t ota = 0;
+    if (!slot || size > slot->size || esp_ota_begin(slot, size, &ota) != ESP_OK) {
+        ESP_LOGE(TAG, "can't take firmware %s (%u bytes)", version, size);
+        close(sock);
+        return;
+    }
+    ESP_LOGI(TAG, "updating to firmware %s (%u bytes)", version, size);
+    psa_crypto_init();   // a no-op once done
+    psa_hash_operation_t sha = PSA_HASH_OPERATION_INIT;
+    psa_hash_setup(&sha, PSA_ALG_SHA_256);
+    static uint8_t buf[4096];
+    unsigned left = size;
+    while (left) {
+        int n = recv(sock, buf, left < sizeof(buf) ? left : sizeof(buf), 0);
+        if (n <= 0 || esp_ota_write(ota, buf, n) != ESP_OK) {
+            break;
+        }
+        psa_hash_update(&sha, buf, n);
+        left -= n;
+    }
+    close(sock);
+    uint8_t digest[32];
+    size_t digest_len = 0;
+    char got[65] = {0};
+    if (psa_hash_finish(&sha, digest, sizeof(digest), &digest_len) != PSA_SUCCESS) {
+        psa_hash_abort(&sha);
+    }
+    for (int i = 0; i < 32; i++) {
+        snprintf(&got[2 * i], 3, "%02x", digest[i]);
+    }
+    if (left || strcmp(got, want) != 0) {
+        ESP_LOGE(TAG, "firmware %s download %s; keeping %s", version, left ? "cut short" : "corrupt",
+                 esp_app_get_description()->version);
+        esp_ota_abort(ota);
+        return;
+    }
+    // esp_ota_end checks the image itself (format, checksum) before it counts.
+    if (esp_ota_end(ota) != ESP_OK || esp_ota_set_boot_partition(slot) != ESP_OK) {
+        ESP_LOGE(TAG, "firmware %s isn't a valid image", version);
+        return;
+    }
+    ESP_LOGI(TAG, "firmware %s written; restarting", version);
+    vTaskDelay(pdMS_TO_TICKS(200));
+    esp_restart();
+}
+
+static void ota_task(void *arg)
+{
+    vTaskDelay(pdMS_TO_TICKS(20000));   // let the stream start first
+    while (true) {
+        if (s_pending_verify) {
+            if (esp_timer_get_time() > OTA_CONFIRM_S * 1000000LL) {
+                ESP_LOGE(TAG, "firmware %s never reached Taco; rolling back",
+                         esp_app_get_description()->version);
+                esp_ota_mark_app_invalid_rollback_and_reboot();
+            }
+            vTaskDelay(pdMS_TO_TICKS(5000));
+            continue;   // no updates until this image has proved itself
+        }
+        xEventGroupWaitBits(s_wifi, WIFI_UP, pdFALSE, pdTRUE, portMAX_DELAY);
+        ota_check();
+        vTaskDelay(pdMS_TO_TICKS(OTA_CHECK_S * 1000));
+    }
+}
+
+static void ota_boot_state(void)
+{
+    esp_ota_img_states_t state;
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    s_pending_verify = esp_ota_get_state_partition(running, &state) == ESP_OK
+                       && state == ESP_OTA_IMG_PENDING_VERIFY;
+    const esp_partition_t *bad = esp_ota_get_last_invalid_partition();
+    esp_app_desc_t desc;
+    if (bad && esp_ota_get_partition_description(bad, &desc) == ESP_OK) {
+        strlcpy(s_bad_version, desc.version, sizeof(s_bad_version));
+    }
+    ESP_LOGI(TAG, "firmware %s in %s%s%s%s", esp_app_get_description()->version, running->label,
+             s_pending_verify ? " (new, on trial)" : "",
+             s_bad_version[0] ? "; rolled back from " : "", s_bad_version);
+}
+
 void app_main(void)
 {
     esp_err_t err = nvs_flash_init();   // Wi-Fi keeps calibration data in NVS
@@ -270,9 +423,11 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(err);
 
+    ota_boot_state();
     s_audio = xStreamBufferCreate(STREAM_BYTES, FRAME_BYTES);
     esp_codec_dev_handle_t mic = mic_start();
     wifi_start();
     xTaskCreatePinnedToCore(mic_task, "mic", 4096, mic, 6, NULL, 1);
     xTaskCreatePinnedToCore(net_task, "net", 4096, NULL, 5, NULL, 0);
+    xTaskCreatePinnedToCore(ota_task, "ota", 6144, NULL, 3, NULL, 0);
 }
