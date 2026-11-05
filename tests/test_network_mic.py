@@ -97,3 +97,63 @@ def test_stall_ignored_while_disconnected_and_reset_on_connect(caplog):
         assert not [r for r in caplog.records if "no audio" in r.message]
         mic.check_stall(now=time.monotonic() + 10)
         assert [r for r in caplog.records if "no audio" in r.message]
+
+
+def fake_image(version: str, body: bytes = b"\x55" * 1000) -> bytes:
+    """Enough of an ESP-IDF app image for image_version()."""
+    head = bytearray(80)
+    head[0] = 0xE9
+    head[32:36] = (0xABCD5432).to_bytes(4, "little")
+    head[48:48 + len(version)] = version.encode()
+    return bytes(head) + body
+
+
+def ask_update(mic, running, token="s3cret") -> bytes:
+    with socket.create_connection(("127.0.0.1", mic.port)) as sock:
+        sock.sendall(f"TACO-OTA living_room {token} {running}\n".encode())
+        sock.settimeout(2)
+        data = b""
+        while chunk := sock.recv(65536):
+            data += chunk
+        return data
+
+
+def test_image_version():
+    from taco.voice.audio import image_version
+    assert image_version(fake_image("20261105-0900-abc1234")) == "20261105-0900-abc1234"
+    assert image_version(b"not an image" * 10) is None
+    assert image_version(b"") is None
+
+
+def test_update_sent_when_version_differs(tmp_path):
+    import hashlib
+    image = fake_image("v2")
+    (tmp_path / "fw.bin").write_bytes(image)
+    mic = start_mic(firmware=tmp_path / "fw.bin")
+    reply = ask_update(mic, "v1")
+    header, body = reply.split(b"\n", 1)
+    assert header.decode() == f"IMAGE {len(image)} {hashlib.sha256(image).hexdigest()} v2"
+    assert body == image
+    assert not mic.connected   # an update check isn't the audio stream
+
+
+def test_no_update_when_current_or_missing(tmp_path):
+    (tmp_path / "fw.bin").write_bytes(fake_image("v2"))
+    assert ask_update(start_mic(firmware=tmp_path / "fw.bin"), "v2") == b"NONE\n"
+    assert ask_update(start_mic(firmware=tmp_path / "missing.bin"), "v1") == b"NONE\n"
+    assert ask_update(start_mic(), "v1") == b"NONE\n"
+
+
+def test_update_needs_the_token(tmp_path):
+    (tmp_path / "fw.bin").write_bytes(fake_image("v2"))
+    assert ask_update(start_mic(firmware=tmp_path / "fw.bin"), "v1", token="wrong") == b""
+
+
+def test_update_check_leaves_audio_connection_alone(tmp_path):
+    (tmp_path / "fw.bin").write_bytes(fake_image("v2"))
+    mic = start_mic(firmware=tmp_path / "fw.bin")
+    with connect(mic) as sock:
+        wait_for(lambda: mic.connected)
+        ask_update(mic, "v1")
+        sock.sendall(FRAME.tobytes())
+        assert np.array_equal(mic.read(timeout=2), FRAME)
