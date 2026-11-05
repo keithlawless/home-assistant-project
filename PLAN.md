@@ -199,3 +199,39 @@ A common `TTSEngine` interface streams sentence by sentence, so speech starts be
     to use the app, which is fine for one household.
 - **Telegram remote control** (deferred 2026-10-09). Text Taco from a phone
   through the Hermes Telegram gateway; needs a bot token from @BotFather.
+- **Living-room satellite: listening light, mute button, OTA updates**
+  (queued 2026-11-05). The Waveshare ESP32-S3-AUDIO-Board's LED ring and
+  buttons aren't used yet, and every firmware change means a USB reflash.
+  - Back channel: today the satellite only streams mic audio to taco-voice.
+    Add short control lines from taco-voice down the same TCP socket
+    (`STATE listening|thinking|speaking|idle`, `MUTE on|off`), so the ring can
+    follow Taco's state. Older firmware simply ignores them.
+  - Light: a colour per state on the LED ring (listening, thinking,
+    speaking), off when idle. A dim red ring while muted.
+  - Mute: a button press stops the stream (or sends silence), lights the
+    ring red and tells taco-voice, which logs it and shows it on the kiosk.
+    It should also follow the kiosk's "stop listening" privacy mode. A
+    hardware mute that stays on the board is the point: it must not depend
+    on the Pi.
+  - OTA: a two-slot OTA partition table (the board has 16 MB flash), with
+    the board pulling a new image from the Pi over the LAN (`esp_https_ota`
+    or plain HTTP plus a SHA-256 check), triggered by a control line or a
+    long button press. A new image that fails to reconnect rolls back on
+    its own. One last USB flash is needed to switch to the OTA layout.
+  - To confirm first: the LED ring and button GPIOs (and whether they sit
+    behind an I/O expander) from the Waveshare schematic.
+- **Living-room satellite: replies on its own speaker** (queued 2026-11-05).
+  A living-room turn currently replies on the kitchen speaker.
+  - Stream Taco's reply audio (TTS, chimes) down the satellite socket to the
+    board's ES8311 DAC and speaker amp. Music stays on the Sonos / Taco Music
+    path. Only voice replies to turns that started on the satellite move.
+  - Echo: the satellite will hear its own reply. To start, the Pi flushes
+    the satellite's audio after playback, as it already does for the
+    kitchen speaker. Barge-in on the satellite needs echo cancellation on
+    the board: ESP-SR's AFE can use the ES7210's MIC3 speaker-loopback
+    channel as its reference. The same AFE adds beamforming and noise
+    suppression, the longer-term fix for TV noise from the 2026-11-05
+    wake analysis.
+  - Decide with the household: should alarms, timers and announcements
+    also play there, or only replies? And should the kitchen chime too?
+  - Depends on the back channel from the item above, so build that first.

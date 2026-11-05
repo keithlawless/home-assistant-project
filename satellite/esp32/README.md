@@ -72,3 +72,5 @@ If the monitor shows `can't reach Taco at 192.168.4.239:10700; retrying`, nothin
   - the buttons as a mic mute
   - over-the-air updates
   - playing replies on its speaker (the ES7210 has a speaker loopback channel that echo cancellation could use)
+
+  These are planned in `PLAN.md` under "Future features".
