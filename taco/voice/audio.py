@@ -134,6 +134,10 @@ class NetworkMicrophone(_FrameSource):
     and `UPDATE` (check for firmware now). `on_connect` runs for each new
     connection, so the caller can resend the current state.
 
+    A satellite reports its own mute button the same way, on a short
+    connection: `TACO-EVENT <name> <token> MUTE on|off`, answered `OK`.
+    While muted it streams silence, so this is only for the log.
+
     Firmware updates use the same port, token and allow list: a satellite
     asks with `TACO-OTA <name> <token> <running version>` and gets back
     `NONE`, or `IMAGE <size> <sha256> <version>` and the image itself, when
@@ -159,6 +163,7 @@ class NetworkMicrophone(_FrameSource):
         self.firmware = Path(firmware) if firmware else None
         self._fw_mtime: float | None = None
         self.on_connect = on_connect
+        self.button_muted: bool | None = None   # unknown until the satellite says
         # Control lines go out on their own thread, so a slow socket never
         # holds up the voice loop.
         self._out: queue.Queue[str] = queue.Queue(maxsize=50)
@@ -242,8 +247,18 @@ class NetworkMicrophone(_FrameSource):
                 return None
             line += byte
         parts = line.decode(errors="replace").split()
-        ok = ((len(parts) == 3 and parts[0] == "TACO") or (len(parts) == 4 and parts[0] == "TACO-OTA"))
+        ok = ((len(parts) == 3 and parts[0] == "TACO") or (len(parts) == 4 and parts[0] == "TACO-OTA")
+              or (len(parts) >= 4 and parts[0] == "TACO-EVENT"))
         return parts if ok and hmac.compare_digest(parts[2].encode(), self._token.encode()) else None
+
+    def _event(self, words: list[str]) -> None:
+        if words[:1] == ["MUTE"] and len(words) == 2:
+            muted = words[1] == "on"
+            if muted != self.button_muted:
+                log.info("satellite %r: mute button %s", self.name, "on (mic muted)" if muted else "off")
+            self.button_muted = muted
+        else:
+            log.warning("satellite %r: unknown event %r", self.name, " ".join(words))
 
     def _serve_update(self, conn: socket.socket, ip: str, running: str) -> None:
         """Answer a firmware check: the image if its version differs."""
@@ -268,6 +283,10 @@ class NetworkMicrophone(_FrameSource):
             if parts[0] == "TACO-OTA":
                 self._serve_update(conn, ip, parts[3])
                 return   # never touches the live audio connection
+            if parts[0] == "TACO-EVENT":
+                self._event(parts[3:])
+                conn.sendall(b"OK\n")
+                return
             conn.settimeout(None)
             conn.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
             # Control lines give up rather than block on a stuck satellite.
