@@ -87,10 +87,23 @@ deploy/satellite-ota.sh            # from the repo root; builds and copies to th
 ```
 The script stamps a unique version (date, commit, and "+" for uncommitted changes), builds it, and puts the image in `/srv/taco/satellite/living_room.bin` on the Pi, mode 0600 because it holds the Wi-Fi password and token. No restart is needed.
 
-At boot and every 15 minutes the board asks taco-voice, on the satellite port with its token, whether there's a build with a different version. If there is, it downloads it, checks its SHA-256, writes the other app slot and restarts. Press **RESET** to check straight away. The taco-voice log shows `sending firmware <version>`.
+taco-voice notices the new image within a second and tells the board (`UPDATE`, below). The board also checks at boot and every 15 minutes. It asks taco-voice, on the satellite port with its token, whether there's a build with a different version. If there is, it downloads it, checks its SHA-256, writes the other app slot and restarts. The taco-voice log shows `sending firmware <version>`.
 
 A new image is on trial. Once it has streamed to Taco for 10 s, it's kept (`firmware <version> confirmed` on the monitor). If it crashes, or doesn't reach Taco within 5 minutes, the board goes back to the previous image and won't take that version again. Deploy a fixed build (any new version) to try again.
 
 A reset while an image is still on trial (its first few seconds after an update) also counts as a failure and rolls it back. So after an update, give it about 30 s before pressing **RESET**.
 
 For another satellite, pass its name: `deploy/satellite-ota.sh "bedroom"` serves `/srv/taco/satellite/bedroom.bin`, or set `firmware = "..."` in its `[[audio.satellites]]` entry.
+
+## Control lines from Taco
+taco-voice writes short text lines down the satellite's connection, and the board reads them between audio frames. A satellite that doesn't read them (older firmware, `taco_satellite.py`) just ignores them.
+
+| Line | Meaning |
+|---|---|
+| `STATE idle` | Taco is waiting for the wake word |
+| `STATE <listening\|thinking\|speaking> here` | a turn this satellite started (or is recording) |
+| `STATE <listening\|thinking\|speaking> elsewhere` | a turn in another room |
+| `MUTE on` / `MUTE off` | the kiosk's "stop listening". While muted, the board sends silence, so its audio never leaves the room |
+| `UPDATE` | new firmware is waiting; check now |
+
+On each connection Taco sends the current `MUTE` and `STATE`, so a board that restarts mid-turn catches up. The monitor logs them (`taco is listening (here)`, `mic muted`).

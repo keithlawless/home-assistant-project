@@ -130,7 +130,8 @@ class VoiceLoop:
         mics = [Microphone(audio["sample_rate"], audio["input_device"], audio["input_name"], self.ready)]
         mics += [
             NetworkMicrophone(s["name"], s["port"], s["token"], s.get("allow"), ready=self.ready,
-                              firmware=s.get("firmware", satellite_firmware(s["name"])))
+                              firmware=s.get("firmware", satellite_firmware(s["name"])),
+                              on_connect=self._sync_satellite)
             for s in audio["satellites"]
         ]
         # openWakeWord keeps a rolling window per stream, so one model per mic.
@@ -156,6 +157,7 @@ class VoiceLoop:
         self.events = Events(cfg["core"]["url"])
         self.cancel = threading.Event()   # stop button or barge-in
         self.muted = False                 # "stop listening" privacy mode
+        self.state = "idle"                # what the screen and satellites show
         self.announcer = Speaker(audio["output_device"])   # alerts, scheduled messages
         self.alarm = AlarmPlayer(Speaker(audio["output_device"]), self.synthesize)
         self.core = CoreLink(cfg["core"]["url"], self._on_core_message)
@@ -201,6 +203,8 @@ class VoiceLoop:
         if muted != self.muted:
             self.muted = muted
             log.info("microphone %s", "muted" if muted else "listening")
+            for sat in self._satellites():
+                sat.send_line(f"MUTE {'on' if muted else 'off'}")
         threshold = WAKE_THRESHOLDS.get(settings.get("wake_sensitivity", "medium"))
         if threshold and threshold != self.listeners[0][1].sensitivity:
             for _, wake in self.listeners:
@@ -259,7 +263,7 @@ class VoiceLoop:
         log.info("listening for wake word on %s (barge-in %s)",
                  ", ".join(mic.name for mic, _ in self.listeners),
                  "on" if self.cfg["audio"]["barge_in"] else "off")
-        self.events.send("state", state="idle")
+        self._set_state("idle")
         while True:
             self.ready.wait()
             self.ready.clear()   # before draining, so a frame arriving mid-drain re-sets it
@@ -287,7 +291,29 @@ class VoiceLoop:
             self._wake_clip = None
             self._reset_wake()
             self.flush_mics()
-            self.events.send("state", state="idle")
+            self._set_state("idle")
+
+    # -- satellites ------------------------------------------------------------------
+
+    def _satellites(self) -> list[NetworkMicrophone]:
+        return [mic for mic, _ in self.listeners if isinstance(mic, NetworkMicrophone)]
+
+    def _state_line(self, sat) -> str:
+        """`STATE <state> here|elsewhere`: whether this satellite has the turn."""
+        if self.state == "idle":
+            return "STATE idle"
+        return f"STATE {self.state} {'here' if self.active[0] is sat else 'elsewhere'}"
+
+    def _set_state(self, state: str) -> None:
+        self.state = state
+        self.events.send("state", state=state)
+        for sat in self._satellites():
+            sat.send_line(self._state_line(sat))
+
+    def _sync_satellite(self, sat) -> None:
+        """A satellite (re)connected: tell it where things stand."""
+        sat.send_line(f"MUTE {'on' if self.muted else 'off'}")
+        sat.send_line(self._state_line(sat))
 
     def _local_margin(self, wake: WakeWord) -> float:
         """How much louder (dB) the local mic heard the last few seconds than
@@ -388,6 +414,8 @@ class VoiceLoop:
             time.sleep(1.0)
             for mic, _ in self.listeners:
                 mic.check_stall()
+            for sat in self._satellites():
+                sat.check_firmware()
 
     def _clip_request(self, audio: np.ndarray | None, text: str | None) -> None:
         """Save the current wake's clip with the request that followed it
@@ -419,7 +447,7 @@ class VoiceLoop:
         vad = self.cfg["listen"]["satellite_vad_aggressiveness" if satellite else "vad_aggressiveness"]
         while True:
             self._play_and_wait(WAKE_CHIME, 22050)
-            self.events.send("state", state="listening")
+            self._set_state("listening")
             audio = record_request(
                 self.active[0],
                 start_timeout_s=start_timeout,
@@ -432,7 +460,7 @@ class VoiceLoop:
                 self._clip_request(None, None)
                 return
 
-            self.events.send("state", state="thinking")
+            self._set_state("thinking")
             t0 = time.monotonic()
             text = self.stt.transcribe(audio)
             log.info("heard (%.2fs): %r", time.monotonic() - t0, text)
@@ -465,7 +493,7 @@ class VoiceLoop:
         if not text:
             return "", False
         self.cancel.clear()
-        self.events.send("state", state="speaking")
+        self._set_state("speaking")
         self.events.send("reply", text=text)
         with BargeIn(self) as barge:
             self.speaker.play(*self.synthesize(text))
@@ -490,7 +518,7 @@ class VoiceLoop:
                     if first_audio is None:
                         first_audio = time.monotonic() - t0
                         log.info("first audio after %.2fs", first_audio)
-                        self.events.send("state", state="speaking")
+                        self._set_state("speaking")
                     self.speaker.play(audio, rate)
                     spoken.append(sentence)
                     self.events.send("reply", text=" ".join(spoken))

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Build the ESP32 satellite firmware on this Mac and hand it to taco-voice
 # on the Pi, which serves it to the board over Wi-Fi (satellite/esp32/README.md).
-# The board checks at boot and every 15 minutes; press RESET to check now.
+# taco-voice tells a connected board to update within a few seconds; the board
+# also checks at boot and every 15 minutes.
 #
 #   deploy/satellite-ota.sh [satellite name]     # default "living room"
 #
@@ -32,5 +33,5 @@ ssh "$PI" 'install -d -m 700 /srv/taco/satellite'
 scp -q "$BIN" "$PI:/srv/taco/satellite/.$FILE.tmp"
 ssh "$PI" "chmod 600 '/srv/taco/satellite/.$FILE.tmp' && mv '/srv/taco/satellite/.$FILE.tmp' '/srv/taco/satellite/$FILE'"
 echo "Firmware $VERSION is on $PI as /srv/taco/satellite/$FILE."
-echo "The '$NAME' satellite picks it up within 15 minutes (or press its RESET button)."
+echo "taco-voice tells the '$NAME' satellite to update within a few seconds."
 echo "Watch: ssh $PI journalctl --user-unit taco-voice -f | grep firmware"

@@ -11,6 +11,11 @@
  * buffer -> net task -> socket. The two tasks are decoupled so a slow or
  * dropped connection never stalls I2S; audio is simply dropped instead.
  *
+ * Control lines from taco-voice (net task, read between frames):
+ *   STATE <idle|listening|thinking|speaking> [here|elsewhere]   for the light
+ *   MUTE on|off      the kiosk's "stop listening": the board sends silence
+ *   UPDATE           check for new firmware now
+ *
  * Firmware updates (ota task): at boot and every OTA_CHECK_S the board asks
  * taco-voice, on the same port, "TACO-OTA <name> <token> <version>". If the
  * Pi has a different build it streams it, and the board checks its SHA-256,
@@ -66,6 +71,12 @@ static const char *TAG = "taco-sat";
 #define OTA_CHECK_S    (15 * 60)   // how often to ask Taco for new firmware
 #define OTA_CONFIRM_S  300         // a new image must reach Taco within this
 #define STREAM_OK_S    10          // ...and stream this long, or it rolls back
+
+// What taco-voice last said (control lines). The light (step 3) reads these.
+static volatile bool s_muted;             // send silence: audio never leaves the board
+static char s_state[16] = "idle";
+static volatile bool s_here;              // this room has the current turn
+static TaskHandle_t s_ota_task;
 
 static bool s_pending_verify;      // running a new image that hasn't proved itself
 static char s_bad_version[32];     // the image that last rolled back; never retaken
@@ -191,8 +202,12 @@ static void mic_task(void *arg)
             vTaskDelay(pdMS_TO_TICKS(100));
             continue;
         }
-        for (int i = 0; i < FRAME_SAMPLES; i++) {
-            mono[i] = (int16_t)(((int32_t)stereo[2 * i] + stereo[2 * i + 1]) / 2);
+        if (s_muted) {
+            memset(mono, 0, sizeof(mono));   // keeps the stream (and stall checks) alive
+        } else {
+            for (int i = 0; i < FRAME_SAMPLES; i++) {
+                mono[i] = (int16_t)(((int32_t)stereo[2 * i] + stereo[2 * i + 1]) / 2);
+            }
         }
         // Never block: if the network is behind, drop this frame.
         if (xStreamBufferSpacesAvailable(s_audio) >= FRAME_BYTES) {
@@ -255,6 +270,47 @@ static bool send_all(int sock, const uint8_t *buf, size_t len)
     return true;
 }
 
+static void handle_line(char *line)
+{
+    char word[16] = {0}, arg[16] = {0}, where[16] = {0};
+    if (sscanf(line, "%15s %15s %15s", word, arg, where) < 1) {
+        return;
+    }
+    if (strcmp(word, "STATE") == 0 && arg[0]) {
+        strlcpy(s_state, arg, sizeof(s_state));
+        s_here = strcmp(where, "here") == 0;
+        ESP_LOGI(TAG, "taco is %s%s", s_state, where[0] ? (s_here ? " (here)" : " (elsewhere)") : "");
+    } else if (strcmp(word, "MUTE") == 0) {
+        bool muted = strcmp(arg, "on") == 0;
+        if (muted != s_muted) {
+            ESP_LOGI(TAG, "mic %s", muted ? "muted" : "unmuted");
+        }
+        s_muted = muted;
+    } else if (strcmp(word, "UPDATE") == 0) {
+        ESP_LOGI(TAG, "taco has new firmware");
+        if (s_ota_task) {
+            xTaskNotifyGive(s_ota_task);
+        }
+    } else {
+        ESP_LOGW(TAG, "unknown control line: %s", line);
+    }
+}
+
+// Drain whatever control bytes have arrived, without waiting.
+static void read_control(int sock, char *line, size_t *len, size_t size)
+{
+    char c;
+    while (recv(sock, &c, 1, MSG_DONTWAIT) == 1) {
+        if (c == '\n') {
+            line[*len] = 0;
+            handle_line(line);
+            *len = 0;
+        } else if (*len + 1 < size) {
+            line[(*len)++] = c;
+        }
+    }
+}
+
 static void net_task(void *arg)
 {
     static uint8_t frame[FRAME_BYTES];
@@ -272,7 +328,10 @@ static void net_task(void *arg)
         backoff_ms = 1000;
         xStreamBufferReset(s_audio);   // start live, not with stale audio
         int64_t since = esp_timer_get_time();
+        char ctl[64];
+        size_t ctl_len = 0;
         while (true) {
+            read_control(sock, ctl, &ctl_len, sizeof(ctl));
             if (s_pending_verify && esp_timer_get_time() - since > STREAM_OK_S * 1000000LL) {
                 esp_ota_mark_app_valid_cancel_rollback();
                 s_pending_verify = false;
@@ -394,7 +453,8 @@ static void ota_task(void *arg)
         }
         xEventGroupWaitBits(s_wifi, WIFI_UP, pdFALSE, pdTRUE, portMAX_DELAY);
         ota_check();
-        vTaskDelay(pdMS_TO_TICKS(OTA_CHECK_S * 1000));
+        // Sleep until the next check, or until taco-voice says "UPDATE".
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(OTA_CHECK_S * 1000));
     }
 }
 
@@ -429,5 +489,5 @@ void app_main(void)
     wifi_start();
     xTaskCreatePinnedToCore(mic_task, "mic", 4096, mic, 6, NULL, 1);
     xTaskCreatePinnedToCore(net_task, "net", 4096, NULL, 5, NULL, 0);
-    xTaskCreatePinnedToCore(ota_task, "ota", 6144, NULL, 3, NULL, 0);
+    xTaskCreatePinnedToCore(ota_task, "ota", 6144, NULL, 3, &s_ota_task, 0);
 }
