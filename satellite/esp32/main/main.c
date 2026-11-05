@@ -11,9 +11,16 @@
  * buffer -> net task -> socket. The two tasks are decoupled so a slow or
  * dropped connection never stalls I2S; audio is simply dropped instead.
  *
+ * Light and mute (ring task): the 7-LED ring shows Taco's state during a
+ * turn that started in this room (listening, thinking, speaking) and stays
+ * dark otherwise; dim red means the mic is muted. The middle key (K2)
+ * mutes this room's mic. That mute lives on the board (kept in NVS), so it
+ * holds through a reboot or with the Pi down, and is reported to taco-voice
+ * as "TACO-EVENT <name> <token> MUTE on|off" on a short connection of its own.
+ *
  * Control lines from taco-voice (net task, read between frames):
  *   STATE <idle|listening|thinking|speaking> [here|elsewhere]   for the light
- *   MUTE on|off      the kiosk's "stop listening": the board sends silence
+ *   MUTE on|off      the kiosk's "stop listening" (house-wide): send silence
  *   UPDATE           check for new firmware now
  *
  * Firmware updates (ota task): at boot and every OTA_CHECK_S the board asks
@@ -45,6 +52,9 @@
 #include "esp_app_desc.h"
 #include "esp_timer.h"
 #include "psa/crypto.h"
+#include "nvs.h"
+#include "led_strip.h"
+#include "esp_io_expander_tca95xx_16bit.h"
 #include "esp_codec_dev.h"
 #include "esp_codec_dev_defaults.h"
 #include "es7210_adc.h"
@@ -60,6 +70,12 @@ static const char *TAG = "taco-sat";
 #define PIN_I2S_BCLK  13
 #define PIN_I2S_WS    14
 #define PIN_I2S_DIN   15   // ES7210 ASDOUT
+#define PIN_LED_RING  38   // 7 WS2812s (RGB order, per Waveshare's demo)
+#define RING_LEDS     7
+// The TCA9555 I/O expander (I2C 0x20) has the three user keys, pressed = low:
+// K1 = P9, K2 = P10, K3 = P11. P8 enables the speaker amp (unused so far).
+#define KEY_MUTE      IO_EXPANDER_PIN_NUM_10   // K2, the middle key
+#define RING_MAX      48   // brightness cap, 0-255: this sits in a living room
 
 #define SAMPLE_RATE   16000
 #define FRAME_SAMPLES 1280                 // 80 ms, the frame size taco-voice uses
@@ -72,8 +88,12 @@ static const char *TAG = "taco-sat";
 #define OTA_CONFIRM_S  300         // a new image must reach Taco within this
 #define STREAM_OK_S    10          // ...and stream this long, or it rolls back
 
-// What taco-voice last said (control lines). The light (step 3) reads these.
-static volatile bool s_muted;             // send silence: audio never leaves the board
+// What taco-voice last said (control lines); the ring shows these.
+static volatile bool s_house_muted;       // the kiosk's "stop listening"
+static volatile bool s_button_muted;      // K2 on this board, kept in NVS
+#define MUTED() (s_house_muted || s_button_muted)   // send silence
+static TaskHandle_t s_event_task;
+static i2c_master_bus_handle_t s_i2c;
 static char s_state[16] = "idle";
 static volatile bool s_here;              // this room has the current turn
 static TaskHandle_t s_ota_task;
@@ -125,7 +145,6 @@ static void wifi_start(void)
 
 static esp_codec_dev_handle_t mic_start(void)
 {
-    i2c_master_bus_handle_t i2c_bus;
     i2c_master_bus_config_t i2c_cfg = {
         .i2c_port = I2C_NUM_0,
         .sda_io_num = PIN_I2C_SDA,
@@ -134,7 +153,7 @@ static esp_codec_dev_handle_t mic_start(void)
         .glitch_ignore_cnt = 7,
         .flags.enable_internal_pullup = true,
     };
-    ESP_ERROR_CHECK(i2c_new_master_bus(&i2c_cfg, &i2c_bus));
+    ESP_ERROR_CHECK(i2c_new_master_bus(&i2c_cfg, &s_i2c));
 
     // The ESP32 is the I2S master: the ES7210 (and the ES8311 sharing the
     // bus) take MCLK/BCLK/LRCK from it rather than making their own.
@@ -160,7 +179,7 @@ static esp_codec_dev_handle_t mic_start(void)
     audio_codec_i2c_cfg_t ctrl_cfg = {
         .port = I2C_NUM_0,
         .addr = ES7210_CODEC_DEFAULT_ADDR,   // 0x40 as a 7-bit address
-        .bus_handle = i2c_bus,
+        .bus_handle = s_i2c,
     };
     const audio_codec_ctrl_if_t *ctrl_if = audio_codec_new_i2c_ctrl(&ctrl_cfg);
     // MIC1/MIC2 are the two physical mics; MIC3 is the speaker loopback
@@ -202,7 +221,7 @@ static void mic_task(void *arg)
             vTaskDelay(pdMS_TO_TICKS(100));
             continue;
         }
-        if (s_muted) {
+        if (MUTED()) {
             memset(mono, 0, sizeof(mono));   // keeps the stream (and stall checks) alive
         } else {
             for (int i = 0; i < FRAME_SAMPLES; i++) {
@@ -282,10 +301,10 @@ static void handle_line(char *line)
         ESP_LOGI(TAG, "taco is %s%s", s_state, where[0] ? (s_here ? " (here)" : " (elsewhere)") : "");
     } else if (strcmp(word, "MUTE") == 0) {
         bool muted = strcmp(arg, "on") == 0;
-        if (muted != s_muted) {
-            ESP_LOGI(TAG, "mic %s", muted ? "muted" : "unmuted");
+        if (muted != s_house_muted) {
+            ESP_LOGI(TAG, "taco %s", muted ? "muted (stop listening)" : "listening again");
         }
-        s_muted = muted;
+        s_house_muted = muted;
     } else if (strcmp(word, "UPDATE") == 0) {
         ESP_LOGI(TAG, "taco has new firmware");
         if (s_ota_task) {
@@ -347,10 +366,10 @@ static void net_task(void *arg)
             }
         }
         close(sock);
+        strlcpy(s_state, "idle", sizeof(s_state));   // don't leave the ring lit
+        s_here = false;
     }
 }
-
-// -- Firmware updates -------------------------------------------------------------
 
 static bool recv_line(int sock, char *line, size_t size)
 {
@@ -367,6 +386,140 @@ static bool recv_line(int sock, char *line, size_t size)
     }
     return false;
 }
+
+// -- Light and mute button --------------------------------------------------------
+
+static void save_button_mute(void)
+{
+    nvs_handle_t nvs;
+    if (nvs_open("taco", NVS_READWRITE, &nvs) == ESP_OK) {
+        nvs_set_u8(nvs, "btn_mute", s_button_muted);
+        nvs_commit(nvs);
+        nvs_close(nvs);
+    }
+}
+
+static void load_button_mute(void)
+{
+    nvs_handle_t nvs;
+    uint8_t v = 0;
+    if (nvs_open("taco", NVS_READONLY, &nvs) == ESP_OK) {
+        nvs_get_u8(nvs, "btn_mute", &v);
+        nvs_close(nvs);
+    }
+    s_button_muted = v;
+    if (v) {
+        ESP_LOGI(TAG, "living-room mic muted by its button (press K2 to unmute)");
+    }
+}
+
+// One frame of the ring for the current state; t_ms drives the animations.
+static void ring_frame(led_strip_handle_t ring, uint32_t t_ms)
+{
+    for (int i = 0; i < RING_LEDS; i++) {
+        uint8_t r = 0, g = 0, b = 0;
+        if (MUTED()) {
+            r = RING_MAX / 3;                               // dim red: not listening
+        } else if (s_here && strcmp(s_state, "listening") == 0) {
+            b = RING_MAX;                                   // solid blue: speak now
+        } else if (s_here && strcmp(s_state, "thinking") == 0) {
+            int head = (t_ms / 90) % RING_LEDS;             // a cyan dot chasing round
+            int d = (i - head + RING_LEDS) % RING_LEDS;
+            uint8_t v = d == 0 ? RING_MAX : d == RING_LEDS - 1 ? RING_MAX / 4 : RING_MAX / 16;
+            g = v;
+            b = v;
+        } else if (s_here && strcmp(s_state, "speaking") == 0) {
+            uint32_t phase = t_ms % 1200;                   // soft green breathing
+            uint32_t up = phase < 600 ? phase : 1200 - phase;
+            g = RING_MAX / 4 + (RING_MAX * 3 / 4) * up / 600;
+        }
+        led_strip_set_pixel(ring, i, r, g, b);
+    }
+    led_strip_refresh(ring);
+}
+
+static void ring_task(void *arg)
+{
+    led_strip_handle_t ring = NULL;
+    led_strip_config_t strip = {
+        .strip_gpio_num = PIN_LED_RING,
+        .max_leds = RING_LEDS,
+        .led_model = LED_MODEL_WS2812,
+        .color_component_format = LED_STRIP_COLOR_COMPONENT_FMT_RGB,
+    };
+    led_strip_rmt_config_t rmt = {.clk_src = RMT_CLK_SRC_DEFAULT, .resolution_hz = 10 * 1000 * 1000};
+    if (led_strip_new_rmt_device(&strip, &rmt, &ring) != ESP_OK) {
+        ESP_LOGE(TAG, "LED ring not found");
+        ring = NULL;
+    }
+    esp_io_expander_handle_t exio = NULL;
+    if (esp_io_expander_new_i2c_tca95xx_16bit(s_i2c, ESP_IO_EXPANDER_I2C_TCA9555_ADDRESS_000, &exio) != ESP_OK) {
+        ESP_LOGE(TAG, "I/O expander not found; no mute button");
+        exio = NULL;
+    } else {
+        esp_io_expander_set_dir(exio, KEY_MUTE, IO_EXPANDER_INPUT);
+    }
+    bool was_down = false;
+    int same = 0;
+    while (true) {
+        uint32_t t_ms = esp_timer_get_time() / 1000;
+        if (ring) {
+            ring_frame(ring, t_ms);
+        }
+        uint32_t level = KEY_MUTE;
+        if (exio && esp_io_expander_get_level(exio, KEY_MUTE, &level) == ESP_OK) {
+            bool down = !(level & KEY_MUTE);
+            same = down == was_down ? 0 : same + 1;
+            if (same >= 2) {                                // held for 2 reads: not bounce
+                was_down = down;
+                same = 0;
+                if (down) {
+                    s_button_muted = !s_button_muted;
+                    save_button_mute();
+                    ESP_LOGI(TAG, "mute button: living-room mic %s", s_button_muted ? "muted" : "on");
+                    if (s_event_task) {
+                        xTaskNotifyGive(s_event_task);
+                    }
+                }
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(40));
+    }
+}
+
+// Tell taco-voice about the mute button, on a short connection of its own.
+static bool send_event(void)
+{
+    int sock = tcp_open();
+    if (sock < 0) {
+        return false;
+    }
+    struct timeval tv = {.tv_sec = 5};
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    char line[160];
+    snprintf(line, sizeof(line), "TACO-EVENT %s %s MUTE %s\n", SAT_NAME, SAT_TOKEN, s_button_muted ? "on" : "off");
+    bool ok = send_all(sock, (const uint8_t *)line, strlen(line)) && recv_line(sock, line, sizeof(line))
+              && strcmp(line, "OK") == 0;
+    close(sock);
+    return ok;
+}
+
+static void event_task(void *arg)
+{
+    bool pending = true;   // report the button once at boot, too
+    while (true) {
+        if (!pending) {
+            ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        }
+        xEventGroupWaitBits(s_wifi, WIFI_UP, pdFALSE, pdTRUE, portMAX_DELAY);
+        pending = !send_event();
+        if (pending) {
+            vTaskDelay(pdMS_TO_TICKS(5000));   // Taco not there yet; try again
+        }
+    }
+}
+
+// -- Firmware updates -------------------------------------------------------------
 
 static void ota_check(void)
 {
@@ -484,10 +637,13 @@ void app_main(void)
     ESP_ERROR_CHECK(err);
 
     ota_boot_state();
+    load_button_mute();
     s_audio = xStreamBufferCreate(STREAM_BYTES, FRAME_BYTES);
     esp_codec_dev_handle_t mic = mic_start();
     wifi_start();
     xTaskCreatePinnedToCore(mic_task, "mic", 4096, mic, 6, NULL, 1);
     xTaskCreatePinnedToCore(net_task, "net", 4096, NULL, 5, NULL, 0);
     xTaskCreatePinnedToCore(ota_task, "ota", 6144, NULL, 3, &s_ota_task, 0);
+    xTaskCreatePinnedToCore(ring_task, "ring", 4096, NULL, 2, NULL, 0);
+    xTaskCreatePinnedToCore(event_task, "event", 4096, NULL, 3, &s_event_task, 0);
 }

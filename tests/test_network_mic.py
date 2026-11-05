@@ -249,3 +249,32 @@ def test_reconnecting_satellite_gets_mute_and_state():
     loop.muted, loop.state = True, "speaking"
     loop._sync_satellite(sat)
     assert sat.lines == ["MUTE on", "STATE speaking elsewhere"]
+
+
+def send_event(mic, words, token="s3cret") -> bytes:
+    with socket.create_connection(("127.0.0.1", mic.port)) as sock:
+        sock.sendall(f"TACO-EVENT living_room {token} {words}\n".encode())
+        sock.settimeout(2)
+        data = b""
+        while chunk := sock.recv(64):
+            data += chunk
+        return data
+
+
+def test_mute_button_events(caplog):
+    import logging
+    caplog.set_level(logging.INFO, logger="taco.voice.audio")
+    mic = start_mic()
+    assert mic.button_muted is None
+    assert send_event(mic, "MUTE on") == b"OK\n"
+    assert mic.button_muted is True
+    assert "mute button on" in caplog.text
+    assert send_event(mic, "MUTE off") == b"OK\n"
+    assert mic.button_muted is False
+    assert not mic.connected   # an event isn't the audio stream
+
+
+def test_events_need_the_token():
+    mic = start_mic()
+    assert send_event(mic, "MUTE on", token="wrong") == b""
+    assert mic.button_muted is None

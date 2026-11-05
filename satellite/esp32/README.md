@@ -1,6 +1,6 @@
 # ESP32 mic satellite (Waveshare ESP32-S3-AUDIO-Board)
 
-This firmware turns the Waveshare ESP32-S3-AUDIO-Board into a Taco mic satellite. It mixes the board's two mics to mono and streams them to taco-voice over Wi-Fi. It uses the same protocol as `../taco_satellite.py`, so nothing changes on the Pi side. After the first USB flash, updates go over Wi-Fi (see [Firmware updates over Wi-Fi](#firmware-updates-over-wi-fi)). The speaker, LED ring and buttons aren't used yet.
+This firmware turns the Waveshare ESP32-S3-AUDIO-Board into a Taco mic satellite. It mixes the board's two mics to mono and streams them to taco-voice over Wi-Fi. It uses the same protocol as `../taco_satellite.py`, so nothing changes on the Pi side. After the first USB flash, updates go over Wi-Fi (see [Firmware updates over Wi-Fi](#firmware-updates-over-wi-fi)). The LED ring shows when Taco is listening, and the middle key mutes the mic. The speaker isn't used yet.
 
 ## One-time setup on the Mac
 ```sh
@@ -74,8 +74,6 @@ If the monitor shows `can't reach Taco at 192.168.4.239:10700; retrying`, nothin
 ## Notes
 - The audio isn't encrypted. The token and the `allow` list are the only protection, so keep port 10700 on the LAN.
 - Possible next steps on this board:
-  - a status/listening light on the LED ring
-  - the buttons as a mic mute
   - playing replies on its speaker (the ES7210 has a speaker loopback channel that echo cancellation could use)
 
   These are planned in `PLAN.md` under "Future features".
@@ -103,7 +101,22 @@ taco-voice writes short text lines down the satellite's connection, and the boar
 | `STATE idle` | Taco is waiting for the wake word |
 | `STATE <listening\|thinking\|speaking> here` | a turn this satellite started (or is recording) |
 | `STATE <listening\|thinking\|speaking> elsewhere` | a turn in another room |
-| `MUTE on` / `MUTE off` | the kiosk's "stop listening". While muted, the board sends silence, so its audio never leaves the room |
+| `MUTE on` / `MUTE off` | the kiosk's "stop listening", house-wide. While muted, the board sends silence, so its audio never leaves the room |
 | `UPDATE` | new firmware is waiting; check now |
 
 On each connection Taco sends the current `MUTE` and `STATE`, so a board that restarts mid-turn catches up. The monitor logs them (`taco is listening (here)`, `mic muted`).
+
+## Light ring and mute button
+The ring lights only for a conversation that started in this room:
+
+| Ring | Meaning |
+|---|---|
+| off | idle, or a conversation in another room |
+| solid blue | listening: speak now |
+| cyan dot chasing round | thinking |
+| green, breathing | speaking |
+| dim red | this mic is muted |
+
+**K2**, the middle key, mutes and unmutes this room's mic. The mute is kept on the board, so it lasts through a reboot or a Pi outage. While muted, the board sends silence. It tells taco-voice with a short `TACO-EVENT <name> <token> MUTE on|off` connection, and the log shows `mute button on (mic muted)`. The kiosk's "stop listening" mutes everything, this mic included, and also turns the ring dim red.
+
+Pins, from Waveshare's demo code: the 7 WS2812 LEDs are on GPIO38 in RGB order. The keys are on the TCA9555 I/O expander (I²C 0x20, on the mic bus): K1 = P9, K2 = P10, K3 = P11, pressed = low. P8 enables the speaker amp. The brightness cap is `RING_MAX` in `main.c`.
