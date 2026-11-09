@@ -159,6 +159,11 @@ DEFAULTS: dict = {
         "client_secret": "",
         "refresh_token": "",
         "device_name": "Taco",   # librespot's --name
+        # Playlists Spotify hides from Taco (Discover Weekly, Daily Mixes...):
+        # spoken name -> share link (Share > Copy link in the app), e.g.
+        #   [spotify.playlists]
+        #   "daily mix 1" = "https://open.spotify.com/playlist/..."
+        "playlists": {},
     },
     "weather_station": {
         # Optional local station for live current conditions

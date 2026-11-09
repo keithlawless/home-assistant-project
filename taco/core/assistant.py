@@ -449,6 +449,8 @@ class Assistant:
                 return _reply(f"I couldn't find an album called {query}.")
             if kind == "artist":
                 return _reply(f"I couldn't find any music by {query}.")
+            if query.startswith("my ") or self.state.spotify_api.is_made_for_you(query):
+                return self._missing_playlist(query)   # never a radio station for "my ..."
         if by:
             query = f"{query} by {by}"   # not in the library: maybe a station knows it
         last = self.state.media.station
@@ -470,9 +472,9 @@ class Assistant:
     # -- Spotify ----------------------------------------------------------------------
 
     async def _spotify_resolve(self, query: str, by: str | None = None, kind: str | None = None,
-                               playlist: bool = False):
+                               playlist: bool = False, mine: bool = False):
         try:
-            return await self.state.spotify_api.resolve(query, by, kind, playlist)
+            return await self.state.spotify_api.resolve(query, by, kind, playlist, mine)
         except (SpotifyError, httpx.HTTPError, OAuthError) as e:
             log.warning("spotify search failed: %s", e)
             return None
@@ -488,7 +490,8 @@ class Assistant:
         return _reply(f"Playing {thing.name}{where} on Spotify.")
 
     async def _do_spotify_play(self, query: str = "", by: str | None = None, kind: str | None = None,
-                               playlist: bool = False, speaker: str | None = None) -> dict[str, Any]:
+                               playlist: bool = False, mine: bool = False,
+                               speaker: str | None = None) -> dict[str, Any]:
         """ "... on Spotify", or one of the user's playlists. Never radio."""
         if not self.state.spotify_api:
             if playlist or kind in ("liked", "playlist"):
@@ -497,14 +500,23 @@ class Assistant:
         chosen = resolve_speaker(speaker, await self.state.speakers.list()) if speaker else None
         if speaker and chosen is None:
             return _reply(f"I don't know a speaker called {speaker}.")
-        thing = await self._spotify_resolve(query, by, kind, playlist)
+        thing = await self._spotify_resolve(query, by, kind, playlist, mine)
         if thing is None:
+            if mine or self.state.spotify_api.is_made_for_you(query):
+                return self._missing_playlist(query)
             what = f"a playlist called {query}" if playlist else (query or "that")
             return _reply(f"I couldn't find {what} on Spotify.")
         if chosen and not await self.state.speakers.select(chosen):
             return _reply(self._unreachable(chosen))
         where = f" on {chosen.name}" if chosen and not chosen.is_kitchen else ""
         return await self._play_spotify(thing, where)
+
+    @staticmethod
+    def _missing_playlist(query: str) -> dict[str, Any]:
+        # Spotify hides its Made For You playlists from Taco; they play from a link.
+        name = query.removeprefix("my ").strip()
+        return _reply(f"I can't find your {name} playlist. Spotify keeps some playlists from me, "
+                      f"so add its share link to Taco's Spotify playlists in the config.")
 
     async def _do_media_resume(self) -> dict[str, Any]:
         try:

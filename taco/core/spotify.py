@@ -11,6 +11,13 @@ contents are readable only for the user's own playlists. So Taco never reads
 contents: it plays context URIs (artist, album, playlist) and Spotify picks
 the tracks.
 
+Spotify's own "Made For You" playlists (Discover Weekly, Release Radar, the
+Daily Mixes) are hidden from such an app: they aren't in /me/playlists, and
+GET /playlists/{id} answers 404. But they play by URI (tested 2026-11-09 with
+Daily Mix 1). So the household lists the ones it wants under
+[spotify.playlists], as share links, and Taco never stands in a stranger's
+playlist of the same name.
+
 Setup (README, "Spotify"): a developer app with redirect
 http://127.0.0.1:8888/callback, deploy/spotify-auth.py for the refresh token,
 and librespot logged in once with --enable-device-auth, so "Taco" is always
@@ -38,6 +45,23 @@ API = "https://api.spotify.com/v1"
 TOKEN_URL = "https://accounts.spotify.com/api/token"
 SEARCH_LIMIT = 10          # the Development Mode maximum
 PLAYLISTS_TTL_S = 600
+# Names of Spotify's personal playlists: only the household's own copy will do.
+MADE_FOR_YOU = re.compile(r"^(?:my )?(?:discover weekly|release radar|daily mix \d+|on repeat|repeat rewind"
+                          r"|time capsule|daylist|.+ radio mix)$")
+LINK = re.compile(r"(?:https?://open\.spotify\.com/(?:intl-\w+/)?|spotify:)(playlist|album|artist|track)[/:]([A-Za-z0-9]+)")
+
+
+_MADE_FOR_YOU_NAMES = ("discover weekly", "release radar", "on repeat", "repeat rewind", "time capsule", "daylist")
+
+
+def _strip_my(q: str) -> str:
+    return re.sub(r"^(?:my|your)\s+", "", q.strip(), flags=re.I)
+
+
+def to_uri(link: str) -> str | None:
+    """spotify:playlist:<id> from a share link or a URI; None if it's neither."""
+    m = LINK.search(link.strip())
+    return f"spotify:{m.group(1)}:{m.group(2)}" if m else None
 
 
 class SpotifyError(Exception):
@@ -80,6 +104,13 @@ class SpotifyClient:
         self._restart_player = restart_player   # async; restarts librespot
         self._playlists: tuple[float, list[dict[str, Any]]] | None = None
         self._user_id: str | None = None
+        # [spotify.playlists]: spoken name -> share link, for playlists the API hides.
+        self.links: dict[str, str] = {}
+        for name, link in (cfg.get("playlists") or {}).items():
+            if uri := to_uri(str(link)):
+                self.links[_norm(name)] = uri
+            else:
+                log.warning("spotify: [spotify.playlists] %r isn't a Spotify link", name)
 
     # -- HTTP -----------------------------------------------------------------------
 
@@ -186,12 +217,39 @@ class SpotifyClient:
             self._user_id = (await self._call("GET", "/me") or {}).get("id", "")
         return self._user_id
 
+    def is_made_for_you(self, query: str) -> bool:
+        """Discover Weekly and the like, also as speech recognition garbles
+        them ("release look radar")."""
+        q = _norm(_strip_my(query))
+        return bool(MADE_FOR_YOU.match(q)) or any(_close(n, q) >= 0.8 for n in _MADE_FOR_YOU_NAMES)
+
+    def _linked(self, query: str) -> Playable | None:
+        """A playlist the household listed in [spotify.playlists]."""
+        query = _strip_my(query)
+        if not self.links or not query:
+            return None
+        name = max(self.links, key=lambda n: _close(n, query))
+        if _close(name, query) >= 0.8:
+            return Playable(f"your {name.title()} playlist", "playlist", context_uri=self.links[name])
+        return None
+
     async def resolve(self, query: str, by: str | None = None, kind: str | None = None,
-                      playlist: bool = False) -> Playable | None:
-        """The best thing to play for a spoken request, or None."""
+                      playlist: bool = False, mine: bool = False) -> Playable | None:
+        """The best thing to play for a spoken request, or None. With `mine`
+        ("my ... playlist", or a Made For You name) only the household's own
+        playlists count: never a stranger's playlist with the same name."""
         query = query.strip()
-        if playlist or kind == "playlist":
-            return await self._my_playlist(query) or await self._public_playlist(query)
+        if not by and kind is None and (linked := self._linked(query)):
+            return linked
+        # "play my ..." is always the household's own, whichever way it was parsed.
+        if re.match(r"(?:my|your)\s", query, re.I):
+            mine, query = True, _strip_my(query)
+        mine = mine or self.is_made_for_you(query)
+        if playlist or kind == "playlist" or mine:
+            found = await self._my_playlist(query)
+            if found or mine:
+                return found
+            return await self._public_playlist(query)
         if kind == "liked":
             return Playable("your liked songs", "collection", context_uri=f"spotify:user:{await self._user()}:collection")
         if kind == "album":
@@ -209,13 +267,16 @@ class SpotifyClient:
                 return self._track(tracks[0])
             # "Kind of Blue by Miles Davis" is an album, not a song.
             return await self.resolve(query, by, kind="album") if kind is None else None
-        # Unqualified: an artist if one matches the name closely, else the best
-        # track, else a playlist ("something chill").
-        found = await self.search(query, "artist,track,playlist")
-        artists, tracks = found.get("artists") or [], found.get("tracks") or []
+        # Unqualified: an artist, album or song whose name matches closely;
+        # else a playlist ("something chill"); else the best song.
+        found = await self.search(query, "artist,album,track,playlist")
+        artists, albums, tracks = (found.get(k) or [] for k in ("artists", "albums", "tracks"))
         if artists and _close(artists[0]["name"], query) >= 0.85:
             a = artists[0]
             return Playable(a["name"], "artist", context_uri=a["uri"])
+        if albums and _close(albums[0]["name"], query) >= 0.85:
+            a = albums[0]
+            return Playable(f"{a['name']} by {_artists(a)}", "album", context_uri=a["uri"])
         if tracks and _close(tracks[0]["name"], query) >= 0.85:
             return self._track(tracks[0])
         if playlists := found.get("playlists"):

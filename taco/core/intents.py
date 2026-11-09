@@ -220,6 +220,8 @@ _FUTURE = re.compile(r"\b(tomorrow|tonight|weekend|week|monday|tuesday|wednesday
 def parse(raw: str, now: datetime | None = None) -> Intent | None:
     now = now or datetime.now()
     text = normalize(raw)
+    # A request said again: "I said play my release radar", "no, play jazz".
+    text = re.sub(r"^(?:i said|i asked (?:you )?to|i want(?:ed)? (?:you )?to) |^no (?=play |put on )", "", text)
     if not text:
         return None
 
@@ -377,6 +379,10 @@ def _album_pick(q: str) -> dict[str, Any] | None:
     return None
 
 
+# "Play" misheard as "plan" ("plan my release radar"); "place" and "plate"
+# are already turned into "play" in parse(). Only for Spotify phrases, whose
+# endings are specific, so "plan my day" stays what it is.
+_PLAY = r"(?:play|put on|plan)"
 _SPEAKER_TAIL = r"(?: (?:on|through|over) (?:the |my )?(?P<s>[a-z0-9 ]+?)(?: speaker)?)?"
 _MY_LISTS = r"discover weekly|release radar|daily mix \d+|on repeat|repeat rewind|time capsule"
 _LIKED = r"(?:liked|favou?rite|saved) (?:songs|tracks|music)|likes|favou?rites"
@@ -388,7 +394,8 @@ def _spotify_slots(q: str) -> dict[str, Any]:
         return {"query": "", "kind": "liked"}
     if m := (re.fullmatch(r"(?:my |the )?(?P<n>.+?) playlist", q) or re.fullmatch(r"(?:my |the )?playlist (?P<n>.+)", q)
              or re.fullmatch(rf"my (?P<n>{_MY_LISTS})", q)):
-        return {"query": m.group("n"), "playlist": True}
+        # "my ...": only the household's own playlist will do, never a namesake.
+        return {"query": m.group("n"), "playlist": True, **({"mine": True} if q.startswith("my ") else {})}
     if picked := _album_pick(q):   # "miles davis s latest album": Spotify search can't sort by date
         return {"query": f"{picked['by']}", "kind": "artist"}
     if m := re.fullmatch(r"(?:the )?album (?P<q>.+?)(?: by (?P<by>.+))?", q):
@@ -402,10 +409,10 @@ def _spotify_slots(q: str) -> dict[str, Any]:
 
 def _spotify_intent(text: str) -> Intent | None:
     """ "Play X on Spotify", and the user's own Spotify playlists."""
-    if m := re.fullmatch(rf"(?:play|put on) (?:some )?(?P<q>.+?) (?:on|from) spotify{_SPEAKER_TAIL}", text):
+    if m := re.fullmatch(rf"{_PLAY} (?:some )?(?P<q>.+?) (?:on|from) spotify{_SPEAKER_TAIL}", text):
         slots = _spotify_slots(m.group("q"))
         return Intent("spotify_play", {**slots, **({"speaker": m.group("s")} if m.group("s") else {})})
-    if m := re.fullmatch(rf"(?:play|put on) (?P<q>my (?:{_MY_LISTS}|{_LIKED})|(?:my |the )?.+? playlist){_SPEAKER_TAIL}", text):
+    if m := re.fullmatch(rf"{_PLAY} (?P<q>my (?:{_MY_LISTS}|{_LIKED})|(?:my |the )?.+? playlist){_SPEAKER_TAIL}", text):
         slots = _spotify_slots(m.group("q"))
         if slots.get("playlist") or slots.get("kind") == "liked":
             return Intent("spotify_play", {**slots, **({"speaker": m.group("s")} if m.group("s") else {})})

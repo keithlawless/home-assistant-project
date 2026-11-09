@@ -309,7 +309,17 @@ Then try "turn off the living room", "set a pasta timer for 9 minutes", or
   2. On a computer with a browser, run `python3 deploy/spotify-auth.py`.
      Then paste the `[spotify]` lines it prints into `config.toml` and
      restart taco-core.
-  3. Log librespot in once, so "Taco" is always listed as a device:
+  3. Spotify hides its "Made For You" playlists (Discover Weekly, Release
+     Radar, the Daily Mixes) from apps like Taco's, but they still play from
+     a link. List the ones you want, using **Share → Copy link** in the app:
+     ```toml
+     [spotify.playlists]
+     "daily mix 1" = "https://open.spotify.com/playlist/..."
+     "discover weekly" = "https://open.spotify.com/playlist/..."
+     ```
+     Then "play my Daily Mix 1" plays yours. A "my ..." request never plays
+     someone else's playlist with the same name.
+  4. Log librespot in once, so "Taco" is always listed as a device:
      ```sh
      systemctl --user stop taco-spotify
      ~/.local/bin/librespot --name Taco --cache ~/.cache/librespot --enable-device-auth

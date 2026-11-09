@@ -153,9 +153,12 @@ class FakeApi:
     def __init__(self, thing):
         self.thing, self.asked = thing, []
 
-    async def resolve(self, query, by=None, kind=None, playlist=False):
+    async def resolve(self, query, by=None, kind=None, playlist=False, mine=False):
         self.asked.append(query)
         return self.thing
+
+    def is_made_for_you(self, query):
+        return False
 
 
 def _assistant(library_hit: bool, spotify_thing, monkeypatch):
@@ -238,3 +241,83 @@ def test_play_music_resumes_spotify_if_it_played_last(monkeypatch):
     a, calls = _assistant_for_empty_play(playing=False, last="spotify", monkeypatch=monkeypatch)
     r = asyncio.run(a._do_media_play("", speaker="sonos"))
     assert calls == [("speaker", "Sonos Move"), ("resume",)] and "Resuming Spotify" in r["speech"]
+
+
+
+# -- playlists Spotify hides from the app (Made For You) ---------------------------
+
+DAILY_MIX = "https://open.spotify.com/playlist/37i9dQZF1E34SAAoksU8wf?si=f51a1fd64f0e4549"
+STRANGER = {"name": "Daily Mix 1", "uri": "spotify:playlist:someone-elses"}
+
+
+def test_share_links_become_uris():
+    from taco.core.spotify import to_uri
+    assert to_uri(DAILY_MIX) == "spotify:playlist:37i9dQZF1E34SAAoksU8wf"
+    assert to_uri("https://open.spotify.com/intl-de/album/abc123") == "spotify:album:abc123"
+    assert to_uri("spotify:playlist:xyz") == "spotify:playlist:xyz"
+    assert to_uri("not a link") is None
+
+
+def linked_go(tmp_path, fake, fn):
+    cfg = {**CFG, "playlists": {"Daily Mix 1": DAILY_MIX}}
+
+    async def go():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(fake.handler)) as http:
+            return await fn(SpotifyClient(cfg, http, tmp_path))
+    return asyncio.run(go())
+
+
+@pytest.mark.parametrize("call", [
+    lambda c: c.resolve("daily mix 1", playlist=True, mine=True),   # "play my daily mix 1"
+    lambda c: c.resolve("daily mix 1"),                             # "play daily mix 1 on spotify"
+])
+def test_a_listed_playlist_plays_from_its_link(tmp_path, call):
+    fake = FakeSpotify(search={"playlist": [STRANGER]})
+    thing = linked_go(tmp_path, fake, call)
+    assert thing.context_uri == "spotify:playlist:37i9dQZF1E34SAAoksU8wf" and thing.name == "your Daily Mix 1 playlist"
+    assert not [c for c in fake.calls if c[1] == "/search"]
+
+
+@pytest.mark.parametrize("call", [
+    lambda c: c.resolve("discover weekly", playlist=True, mine=True),
+    lambda c: c.resolve("release radar"),               # a Made For You name, even without "my"
+    lambda c: c.resolve("dinner party", playlist=True, mine=True),
+])
+def test_my_playlists_never_fall_back_to_a_strangers(go, call):
+    fake = FakeSpotify(search={"playlist": [STRANGER], "artist": [], "track": []})
+    assert go(fake, call) is None
+    assert not [c for c in fake.calls if c[1] == "/search"]
+
+
+def test_a_named_public_playlist_still_works(go):
+    fake = FakeSpotify(search={"playlist": [PLAYLIST]})
+    thing = go(fake, lambda c: c.resolve("chill dinner", playlist=True))
+    assert thing.context_uri == "spotify:playlist:chill"
+
+
+def test_an_album_beats_a_public_playlist_of_the_same_name(go):
+    namesake = {"name": "Kind of Blue - Miles Davis", "uri": "spotify:playlist:namesake"}
+    fake = FakeSpotify(search={"album": [ALBUM], "playlist": [namesake], "artist": [], "track": []})
+    thing = go(fake, lambda c: c.resolve("kind of blue"))
+    assert thing.kind == "album" and thing.context_uri == "spotify:album:kob"
+
+
+
+@pytest.mark.parametrize("query", ["my release look radar", "release look radar", "my release radar"])
+def test_a_garbled_my_playlist_still_finds_the_link(tmp_path, query):
+    fake = FakeSpotify(search={"playlist": [{"name": "My Release Radar", "uri": "spotify:playlist:stranger"}]})
+    cfg = {**CFG, "playlists": {"release radar": "https://open.spotify.com/playlist/37i9dQZEVXbsZV3CF6e6dx"}}
+
+    async def go():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(fake.handler)) as http:
+            return await SpotifyClient(cfg, http, tmp_path).resolve(query)
+    thing = asyncio.run(go())
+    assert thing.context_uri == "spotify:playlist:37i9dQZEVXbsZV3CF6e6dx"
+    assert not [c for c in fake.calls if c[1] == "/search"]
+
+
+def test_play_my_anything_never_plays_a_stranger(go):
+    fake = FakeSpotify(search={"playlist": [{"name": "My Road Trip", "uri": "spotify:playlist:stranger"}],
+                               "artist": [], "album": [], "track": []})
+    assert go(fake, lambda c: c.resolve("my road trip")) is None   # not one of the household's
+    assert not [c for c in fake.calls if c[1] == "/search"]
