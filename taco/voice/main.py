@@ -29,7 +29,7 @@ from taco.voices import DEFAULT_VOICE, PREVIEW_TEXT
 from .alarm import AlarmPlayer
 from .clips import ClipRecorder
 from .tv import TvPauser
-from .audio import Microphone, NetworkMicrophone, SatelliteChannel, Speaker, tone
+from .audio import Microphone, NetworkMicrophone, SatelliteChannel, SatelliteMix, Speaker, tone
 from .core_link import CoreLink
 from .hermes import HermesClient, asks_question
 from .listen import record_request
@@ -497,6 +497,15 @@ class VoiceLoop:
         for mic, _ in self.listeners:
             mic.flush()
 
+    def _request_source(self):
+        """Where to record the request: the turn's mic, or for a satellite
+        streaming two separated channels, both of them added together."""
+        mic = self.active[0]
+        sat = mic.parent if isinstance(mic, SatelliteChannel) else mic
+        if isinstance(sat, NetworkMicrophone) and sat.channels == 2:
+            return SatelliteMix(sat)
+        return mic
+
     def converse(self) -> None:
         """One wake: a request, plus follow-ups while Taco keeps asking questions
         or keeps being interrupted."""
@@ -507,7 +516,7 @@ class VoiceLoop:
             self._play_and_wait(WAKE_CHIME, 22050)
             self._set_state("listening")
             audio = record_request(
-                self.active[0],
+                self._request_source(),
                 start_timeout_s=start_timeout,
                 end_silence_s=self.cfg["listen"]["end_silence_s"],
                 max_seconds=self.cfg["listen"]["max_seconds"],
