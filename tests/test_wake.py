@@ -181,7 +181,7 @@ def _loop_with(local_level, satellite_level, limit=10.0, kitchen_scores=(0.0,)):
     from taco.voice.main import VoiceLoop
 
     loop = VoiceLoop.__new__(VoiceLoop)   # no models or devices
-    loop.cfg = {"wake": {"local_priority_db": limit, "local_defer_s": 0.8, "local_listen_db": 24.0}}
+    loop.cfg = {"wake": {"local_priority_db": limit, "local_defer_s": 0.8, "local_listen_db": 15.0}}
     loop.clips = None
     loop.muted = False
     loop._deferred = None
@@ -195,9 +195,9 @@ def _loop_with(local_level, satellite_level, limit=10.0, kitchen_scores=(0.0,)):
 
 def test_satellite_wake_waits_then_fires_when_kitchen_stays_quiet(caplog):
     caplog.set_level(logging.INFO, logger="taco.voice")
-    loop, mic, satellite = _loop_with(1600, 300)   # ~15 dB: living-room speech
+    loop, mic, satellite = _loop_with(1200, 300)   # ~12 dB: living-room speech
     assert loop._detect_wake(now=0.0) is None
-    assert "waits: kitchen heard it 15 dB louder" in caplog.records[-1].message
+    assert "waits: kitchen heard it 12 dB louder" in caplog.records[-1].message
     satellite.frames.append(FRAME)   # request audio stays buffered meanwhile
     mic.frames.append(FRAME)
     assert loop._detect_wake(now=0.5) is None
@@ -219,7 +219,7 @@ def test_kitchen_wins_when_it_wakes_too(caplog):
 
 
 def test_fallback_listens_on_kitchen_when_far_louder():
-    loop, mic, satellite = _loop_with(8000, 300)   # ~28 dB: the speaker is in the kitchen
+    loop, mic, satellite = _loop_with(3200, 300)   # ~21 dB: the speaker is in the kitchen
     assert loop._detect_wake(now=0.0) is None
     score, detector, listener = loop._detect_wake(now=1.0)
     assert detector[0] is satellite and listener[0] is mic

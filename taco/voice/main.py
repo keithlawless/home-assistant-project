@@ -271,16 +271,22 @@ class VoiceLoop:
                 continue
             score, (mic, wake), self.active = heard
             verified = wake.last_verified
+            local = mic is self.listeners[0][0]
+            margin = None if local else round(self._local_margin(wake), 1)
             log.info("wake word (%.2f, %s)%s%s%s", score, mic.name,
                      f", {wake.verdict(verified)}" if verified is not None else "",
-                     "" if mic is self.listeners[0][0] else f", local mic {self._local_margin(wake):+.0f} dB",
+                     "" if local else f", local mic {margin:+.0f} dB",
                      "" if self.active[0] is mic else f", listening on {self.active[0].name}")
             if self.clips:
                 audio, scores = wake.recent()
+                # Satellite wakes keep the local mic's margin, for tuning
+                # local_priority_db and local_listen_db from clips alone.
                 self._wake_clip = {"room": mic.name, "audio": audio, "info": {
                     "score": round(score, 3), "threshold": round(wake.threshold, 3),
                     "patience": wake.patience, "preroll_s": round(len(audio) / 16000, 2),
                     "scores": scores, **_verified_info(verified),
+                    **({} if local else {"local_margin_db": margin}),
+                    **({} if self.active[0] is mic else {"request_mic": self.active[0].name}),
                 }}
             self._reset_wake()
             if self.alarm.active:
