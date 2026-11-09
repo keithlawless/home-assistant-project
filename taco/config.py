@@ -53,13 +53,14 @@ DEFAULTS: dict = {
         # louder, the satellite waits local_defer_s for the local mic to wake
         # too, and the local mic wins if it does. If it doesn't, the satellite
         # wakes after all, so a living-room wake isn't lost when the kitchen
-        # also hears it (TV, or the local mic's higher gain: living-room
-        # speech measured 4-18 dB louder on the local mic, kitchen speech
-        # mostly 21-37). At local_listen_db or more the speaker is surely at
-        # the local mic, so the request is taken from there. 0 = off.
+        # also hears it (TV, or the local mic's higher gain). Since the
+        # satellite streams both its mics (Nov 2026), living-room speech
+        # measures about +4..+6 dB on the local mic and kitchen speech
+        # +20..+37. At local_listen_db or more the speaker is surely at the
+        # local mic, so the request is taken from there. 0 = off.
         "local_priority_db": 10.0,
         "local_defer_s": 0.8,
-        "local_listen_db": 24.0,
+        "local_listen_db": 15.0,
         # Keep a short clip of every wake and near miss, for tuning and
         # retraining (taco/voice/clips.py). Near misses are runs that peak at
         # or above near_miss without firing. Oldest clips go past max_clips.

@@ -29,6 +29,11 @@ for d in data models voices logs photos matter; do
   install -d -o "$TACO_USER" -g "$TACO_USER" "/srv/taco/$d"
 done
 
+echo "==> Keeping the journal across reboots (the SD-card image keeps it in RAM)"
+install -d /etc/systemd/journald.conf.d
+install -m 0644 "$(dirname "$0")/journald/50-taco-persistent.conf" /etc/systemd/journald.conf.d/
+systemctl restart systemd-journald
+
 echo "==> Enabling Docker and user-service lingering"
 systemctl enable --now docker
 # Lets taco's systemd --user services (core, voice, hermes) start at boot without a login.
