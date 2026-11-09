@@ -470,9 +470,9 @@ class Assistant:
     # -- Spotify ----------------------------------------------------------------------
 
     async def _spotify_resolve(self, query: str, by: str | None = None, kind: str | None = None,
-                               playlist: bool = False):
+                               playlist: bool = False, mine: bool = False):
         try:
-            return await self.state.spotify_api.resolve(query, by, kind, playlist)
+            return await self.state.spotify_api.resolve(query, by, kind, playlist, mine)
         except (SpotifyError, httpx.HTTPError, OAuthError) as e:
             log.warning("spotify search failed: %s", e)
             return None
@@ -488,7 +488,8 @@ class Assistant:
         return _reply(f"Playing {thing.name}{where} on Spotify.")
 
     async def _do_spotify_play(self, query: str = "", by: str | None = None, kind: str | None = None,
-                               playlist: bool = False, speaker: str | None = None) -> dict[str, Any]:
+                               playlist: bool = False, mine: bool = False,
+                               speaker: str | None = None) -> dict[str, Any]:
         """ "... on Spotify", or one of the user's playlists. Never radio."""
         if not self.state.spotify_api:
             if playlist or kind in ("liked", "playlist"):
@@ -497,8 +498,12 @@ class Assistant:
         chosen = resolve_speaker(speaker, await self.state.speakers.list()) if speaker else None
         if speaker and chosen is None:
             return _reply(f"I don't know a speaker called {speaker}.")
-        thing = await self._spotify_resolve(query, by, kind, playlist)
+        thing = await self._spotify_resolve(query, by, kind, playlist, mine)
         if thing is None:
+            if mine or self.state.spotify_api.is_made_for_you(query):
+                # Spotify hides its Made For You playlists from Taco; they play from a link.
+                return _reply(f"I can't find your {query} playlist. Spotify keeps some playlists from me, "
+                              f"so add its share link to Taco's Spotify playlists in the config.")
             what = f"a playlist called {query}" if playlist else (query or "that")
             return _reply(f"I couldn't find {what} on Spotify.")
         if chosen and not await self.state.speakers.select(chosen):

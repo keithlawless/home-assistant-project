@@ -1049,7 +1049,9 @@ async def spotify_search(q: str, type: str = "artist,album,track,playlist") -> d
 
 @app.get("/api/spotify/playlists")
 async def spotify_playlists() -> list[dict[str, Any]]:
-    return await _spotify().my_playlists()
+    api = _spotify()
+    linked = [{"name": name, "uri": uri, "owner": "config.toml"} for name, uri in api.links.items()]
+    return linked + await api.my_playlists()
 
 
 @app.post("/api/spotify/play")

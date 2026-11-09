@@ -242,8 +242,9 @@ def test_speakers(text, name, slots):
     ("play Kind of Blue by Miles Davis on Spotify", {"query": "kind of blue", "by": "miles davis"}),
     ("Play the album Kind of Blue on Spotify", {"query": "kind of blue", "kind": "album"}),
     ("play songs by Radiohead on Spotify on the Sonos", {"query": "radiohead", "kind": "artist", "speaker": "sonos"}),
-    ("Play my Discover Weekly", {"query": "discover weekly", "playlist": True}),
-    ("Play my dinner party playlist", {"query": "dinner party", "playlist": True}),
+    ("Play my Discover Weekly", {"query": "discover weekly", "playlist": True, "mine": True}),
+    ("Play my dinner party playlist", {"query": "dinner party", "playlist": True, "mine": True}),
+    ("Play the chill vibes playlist on Spotify", {"query": "chill vibes", "playlist": True}),
     ("play my liked songs", {"query": "", "kind": "liked"}),
 ])
 def test_spotify_intents(text, slots):

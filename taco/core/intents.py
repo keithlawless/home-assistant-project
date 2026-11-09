@@ -388,7 +388,8 @@ def _spotify_slots(q: str) -> dict[str, Any]:
         return {"query": "", "kind": "liked"}
     if m := (re.fullmatch(r"(?:my |the )?(?P<n>.+?) playlist", q) or re.fullmatch(r"(?:my |the )?playlist (?P<n>.+)", q)
              or re.fullmatch(rf"my (?P<n>{_MY_LISTS})", q)):
-        return {"query": m.group("n"), "playlist": True}
+        # "my ...": only the household's own playlist will do, never a namesake.
+        return {"query": m.group("n"), "playlist": True, **({"mine": True} if q.startswith("my ") else {})}
     if picked := _album_pick(q):   # "miles davis s latest album": Spotify search can't sort by date
         return {"query": f"{picked['by']}", "kind": "artist"}
     if m := re.fullmatch(r"(?:the )?album (?P<q>.+?)(?: by (?P<by>.+))?", q):
