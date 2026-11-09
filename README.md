@@ -295,6 +295,27 @@ Then try "turn off the living room", "set a pasta timer for 9 minutes", or
   "play the radio on Sonos", using its name. Taco's voice stays in the kitchen.
 - **Spotify Connect:** Taco shows up as a speaker named "Taco" in the Spotify
   app.
+- **Spotify by voice** (Premium): "play Miles Davis on Spotify", "play my
+  Discover Weekly", "play my dinner party playlist", "play my liked songs",
+  pause, "resume the music", next and previous, "what's playing?". A plain
+  "play X" tries your music collection first, then Spotify, then radio.
+  Hermes can also pick playlists for vaguer requests ("something chill for
+  dinner"). Setup, once:
+  1. At [developer.spotify.com](https://developer.spotify.com/dashboard),
+     create an app with the Web API and redirect URI
+     `http://127.0.0.1:8888/callback`, and add your account under
+     **User Management**. New apps run in Development Mode: up to 5 users,
+     and the owner needs Premium.
+  2. On a computer with a browser, run `python3 deploy/spotify-auth.py`.
+     Then paste the `[spotify]` lines it prints into `config.toml` and
+     restart taco-core.
+  3. Log librespot in once, so "Taco" is always listed as a device:
+     ```sh
+     systemctl --user stop taco-spotify
+     ~/.local/bin/librespot --name Taco --cache ~/.cache/librespot --enable-device-auth
+     # enter the code it shows at spotify.com/pair, wait for "Authenticated", then Ctrl-C
+     systemctl --user start taco-spotify
+     ```
 - **Pause the TV while you talk:** when a turn starts on a mic in an Apple TV's
   room, Taco pauses the Apple TV (only if it's playing) and resumes it after
   the reply, so nothing is missed. It pauses rather than mutes because an Apple

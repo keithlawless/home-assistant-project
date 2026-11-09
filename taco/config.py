@@ -144,6 +144,16 @@ DEFAULTS: dict = {
         "workers": 6,
         "db": str(TACO_HOME / "data" / "music.db"),
     },
+    "spotify": {
+        # Voice control of Spotify (taco/core/spotify.py). Empty = off. A
+        # Development Mode app at developer.spotify.com, with redirect URI
+        # http://127.0.0.1:8888/callback; deploy/spotify-auth.py gets the
+        # refresh token. Keep all three in /srv/taco/config.toml only.
+        "client_id": "",
+        "client_secret": "",
+        "refresh_token": "",
+        "device_name": "Taco",   # librespot's --name
+    },
     "weather_station": {
         # Optional local station for live current conditions
         # (taco/core/stations/README.md). Empty provider = off: the forecast

@@ -43,6 +43,7 @@ from .oauth import OAuthError
 from .scenes import SceneStore, scene_key
 from .scheduler import Scheduler, ScheduleStore, describe
 from .speakers import KITCHEN, Speakers, resolve
+from .spotify import Playable, SpotifyClient, SpotifyError
 from .stations import Reading, make_station
 from .weather import apply_station, fetch_forecast, geocode, locate_by_ip
 from .webhook import MAX_BODY_BYTES, Rejected, WebhookGuard, forward, parse_payload
@@ -88,6 +89,9 @@ class State:
                                     window_s=h["window_s"], interval_s=h["interval_s"])
         self.media = RadioPlayer(MUSIC_SINK, on_change=self.broadcast_media)
         self.spotify = SpotifyState()
+        sp = self.cfg["spotify"]
+        self.spotify_api = (SpotifyClient(sp, self.http, TACO_HOME / "data" / "oauth", restart_player=self.spotify.stop)
+                            if sp["client_id"] and sp["client_secret"] and sp["refresh_token"] else None)
         self.library = Library(self.cfg["music"])
         self.speakers = Speakers(self.cfg["speakers"]["idle_revert_min"] * 60,
                                  music_playing=lambda: self.music_playing, on_change=self.broadcast_media)
@@ -122,8 +126,32 @@ class State:
         if self.media.playing:
             await self.media.stop()
         if self.spotify.playing:
-            await self.spotify.stop()
+            await self._stop_spotify()
             await self.broadcast_media()
+
+    async def _stop_spotify(self) -> None:
+        """Pause Spotify, so "resume the music" can pick it up again. Without
+        the Web API, restart librespot (it has no local pause)."""
+        if self.spotify_api:
+            try:
+                await self.spotify_api.pause()
+                self.spotify.playing = False
+                return
+            except (SpotifyError, httpx.HTTPError, OAuthError) as e:
+                log.info("spotify pause failed (%s); restarting librespot", e)
+        await self.spotify.stop()
+
+    async def play_spotify(self, thing: Playable) -> None:
+        if self.media.playing:
+            await self.media.stop()
+        await self.spotify_api.play(thing)
+
+    async def resume_music(self) -> bool:
+        """Resume paused Spotify on Taco. False if there's nothing to resume."""
+        if not self.spotify_api or self.spotify.playing or not self.spotify.track:
+            return False
+        await self.spotify_api.resume()
+        return True
 
     async def broadcast_media(self) -> None:
         await self.hub.broadcast({"type": "media", "media": self.media_status()})
@@ -149,12 +177,12 @@ class State:
     async def play_station(self, station: dict[str, Any]) -> None:
         """A radio station, or a library playlist played again."""
         if self.spotify.playing:
-            await self.spotify.stop()
+            await self._stop_spotify()
         await self.media.play(station)
 
     async def play_library(self, plan: Plan) -> None:
         if self.spotify.playing:
-            await self.spotify.stop()
+            await self._stop_spotify()
         await self.media.play(self.library.station(plan))
 
     async def _vacation_power(self, ids: list[int], on: bool) -> None:
@@ -979,6 +1007,66 @@ async def music_reindex() -> dict[str, Any]:
 
 
 # --- speakers (where music plays; taco/core/speakers.py) -------------------------
+
+
+# -- Spotify (taco/core/spotify.py) ---------------------------------------------------
+
+def _spotify() -> SpotifyClient:
+    if not state.spotify_api:
+        raise HTTPException(503, "Spotify isn't set up ([spotify] in config.toml)")
+    return state.spotify_api
+
+
+@app.get("/api/spotify/search")
+async def spotify_search(q: str, type: str = "artist,album,track,playlist") -> dict[str, Any]:
+    found = await _spotify().search(q, type)
+    def brief(i: dict[str, Any]) -> dict[str, Any]:
+        who = ", ".join(a.get("name", "") for a in i.get("artists") or [])
+        return {"name": i.get("name"), "uri": i.get("uri"), **({"by": who} if who else {})}
+    return {k: [brief(i) for i in v] for k, v in found.items()}
+
+
+@app.get("/api/spotify/playlists")
+async def spotify_playlists() -> list[dict[str, Any]]:
+    return await _spotify().my_playlists()
+
+
+@app.post("/api/spotify/play")
+async def spotify_play(body: dict[str, Any]) -> dict[str, Any]:
+    """body: {"uri"} from search or playlists, or {"query", "kind"?, "by"?}."""
+    api = _spotify()
+    if uri := body.get("uri"):
+        kind = uri.split(":")[1] if uri.count(":") >= 2 else "track"
+        thing = (Playable(body.get("name") or uri, kind, uris=[uri]) if kind == "track"
+                 else Playable(body.get("name") or uri, kind, context_uri=uri))
+    else:
+        thing = await api.resolve(body.get("query") or "", body.get("by"), body.get("kind"))
+        if thing is None:
+            raise HTTPException(404, "nothing on Spotify matched")
+    try:
+        await state.play_spotify(thing)
+    except SpotifyError as e:
+        raise HTTPException(409, str(e))
+    return {"playing": thing.name, "kind": thing.kind}
+
+
+@app.post("/api/spotify/control")
+async def spotify_control(body: dict[str, Any]) -> dict[str, Any]:
+    """body: {"action": "pause" | "resume" | "next" | "previous"}."""
+    api, action = _spotify(), body.get("action")
+    try:
+        if action == "pause":
+            await state.stop_music()
+        elif action == "resume":
+            if not await state.resume_music():
+                return {"ok": False, "reason": "nothing to resume"}
+        elif action in ("next", "previous"):
+            await api.skip(1 if action == "next" else -1)
+        else:
+            raise HTTPException(400, "action: pause, resume, next or previous")
+    except SpotifyError as e:
+        raise HTTPException(409, str(e))
+    return {"ok": True}
 
 @app.get("/api/speakers")
 async def list_speakers() -> dict[str, Any]:

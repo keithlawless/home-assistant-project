@@ -33,12 +33,13 @@ class OAuthError(Exception):
 
 class OAuthToken:
     def __init__(self, name: str, token_url: str, client_id: str, client_secret: str,
-                 seed_refresh_token: str, store_dir: Path):
+                 seed_refresh_token: str, store_dir: Path, basic_auth: bool = False):
         if not (client_id and client_secret and seed_refresh_token):
             raise ValueError(f"{name}: client_id, client_secret and refresh_token are all required")
         self.name = name
         self._token_url = token_url
         self._client = {"client_id": client_id, "client_secret": client_secret}
+        self._basic_auth = basic_auth   # client credentials in an Authorization header (Spotify), not the body
         self._seed = seed_refresh_token
         self._path = Path(store_dir) / f"{name}.json"
         self._lock = asyncio.Lock()
@@ -61,8 +62,12 @@ class OAuthToken:
         os.replace(tmp, self._path)
 
     async def _refresh_with(self, http: httpx.AsyncClient, refresh_token: str) -> bool:
-        r = await http.post(self._token_url, data={"grant_type": "refresh_token",
-                                                   "refresh_token": refresh_token, **self._client})
+        data = {"grant_type": "refresh_token", "refresh_token": refresh_token}
+        if self._basic_auth:
+            r = await http.post(self._token_url, data=data,
+                                auth=(self._client["client_id"], self._client["client_secret"]))
+        else:
+            r = await http.post(self._token_url, data={**data, **self._client})
         if r.status_code in (400, 401, 403):
             log.warning("%s: refresh token rejected (%s)", self.name, _error_code(r))
             return False
