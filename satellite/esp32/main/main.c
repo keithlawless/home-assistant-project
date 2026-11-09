@@ -66,6 +66,7 @@
 #include "freertos/event_groups.h"
 #include "freertos/stream_buffer.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_netif.h"
@@ -112,6 +113,9 @@ static const char *TAG = "taco-sat";
 #define DECIM         (I2S_RATE / SAMPLE_RATE)
 #define FIR_TAPS      127                  // decimation low-pass (odd, symmetric)
 #define FIR_CUTOFF_HZ 7200                 // -6 dB point; 8 kHz is the new Nyquist
+#ifndef SPEAKER_AEC
+#define SPEAKER_AEC   1                    // echo-cancel the speaker (front end on)
+#endif
 #define ADC_CHANNELS  4                    // per frame, see the audio path above
 #define MIC_A         1                    // the two mic channels
 #define MIC_B         3
@@ -231,9 +235,10 @@ static esp_codec_dev_handle_t mic_start(void)
     i2s_chan_handle_t tx, rx;
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
     chan_cfg.auto_clear_after_cb = true;   // silence when there's nothing to play
-    // 6 x 10 ms of DMA: the mic task decimates a frame between reads.
-    chan_cfg.dma_desc_num = 6;
-    chan_cfg.dma_frame_num = I2S_RATE / 100;
+    // 8 x 5 ms of DMA: the mic task decimates a frame (a few ms) between reads.
+    // Internal RAM is tight (Wi-Fi needs its share), so no more than that.
+    chan_cfg.dma_desc_num = 8;
+    chan_cfg.dma_frame_num = I2S_RATE / 200;
     ESP_ERROR_CHECK(i2s_new_channel(&chan_cfg, &tx, &rx));
     i2s_std_config_t std_cfg = {
         .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(I2S_RATE),
@@ -313,7 +318,10 @@ static esp_codec_dev_handle_t mic_start(void)
 }
 
 // Per-channel levels for the LEVELS report.
-static char s_levels[96];
+static char s_levels[200];
+// Load counters, reported with the levels (frames are 80 ms; µs are totals).
+static volatile uint32_t s_n_afe_out, s_n_sent, s_n_dropped;
+static int64_t s_us_decim, s_us_feed;
 
 // -- Speech front end -------------------------------------------------------------
 
@@ -325,7 +333,7 @@ static bool afe_start(void)
     if (!cfg) {
         return false;
     }
-    cfg->aec_init = s_spk != NULL;   // cancel the board's own speaker (reference = R)
+    cfg->aec_init = SPEAKER_AEC && s_spk != NULL;   // cancel the board's own speaker (reference = R)
     cfg->se_init = true;         // BSS: split the two mics into separate sources
     cfg->ns_init = false;
     cfg->vad_init = false;       // taco-voice does VAD,
@@ -399,8 +407,11 @@ static void afe_task(void *arg)
             out[2 * fill + 1] = MUTED() ? 0 : b;
             if (++fill == FRAME_SAMPLES) {
                 fill = 0;
+                s_n_afe_out++;
                 if (xStreamBufferSpacesAvailable(s_audio) >= sizeof(out)) {
                     xStreamBufferSend(s_audio, out, sizeof(out), 0);
+                } else {
+                    s_n_dropped++;
                 }
             }
         }
@@ -493,35 +504,65 @@ static void fir_init(void)
 }
 
 // 80 ms of the 48 kHz bus (four channels) -> 80 ms at 16 kHz, same layout.
+// Works in small blocks so the float history stays small: internal RAM is
+// needed by Wi-Fi, and the bus frame itself is in PSRAM.
+#define DECIM_BLOCK 128   // output samples per block
 static void decimate(const int16_t *bus, int16_t *quad)
 {
-    static float x[DECIM_NCH][HIST + BUS_SAMPLES];   // history, then this frame
+    static float x[DECIM_NCH][HIST + DECIM_BLOCK * DECIM];   // history, then a block
     const int mid = HIST / 2;
     for (int c = 0; c < DECIM_NCH; c++) {
         float *xc = x[c];
-        for (int i = 0; i < BUS_SAMPLES; i++) {
-            xc[HIST + i] = bus[i * ADC_CHANNELS + DECIM_CH[c]];
-        }
-        for (int i = 0; i < FRAME_SAMPLES; i++) {
-            const float *w = &xc[i * DECIM];
-            float y = s_fir[mid] * w[mid];
-            for (int k = 0; k < mid; k++) {
-                y += s_fir[k] * (w[k] + w[HIST - k]);   // symmetric taps
+        const int ch = DECIM_CH[c];
+        for (int o = 0; o < FRAME_SAMPLES; o += DECIM_BLOCK) {
+            int outs = FRAME_SAMPLES - o < DECIM_BLOCK ? FRAME_SAMPLES - o : DECIM_BLOCK;
+            int ins = outs * DECIM;
+            for (int i = 0; i < ins; i++) {
+                xc[HIST + i] = bus[(o * DECIM + i) * ADC_CHANNELS + ch];
             }
-            int v = lrintf(y);
-            quad[i * ADC_CHANNELS + DECIM_CH[c]] = v > 32767 ? 32767 : v < -32768 ? -32768 : v;
+            for (int i = 0; i < outs; i++) {
+                const float *w = &xc[i * DECIM];
+                float y = s_fir[mid] * w[mid];
+                for (int k = 0; k < mid; k++) {
+                    y += s_fir[k] * (w[k] + w[HIST - k]);   // symmetric taps
+                }
+                int v = lrintf(y);
+                quad[(o + i) * ADC_CHANNELS + ch] = v > 32767 ? 32767 : v < -32768 ? -32768 : v;
+            }
+            memmove(xc, &xc[ins], HIST * sizeof(float));
         }
-        memmove(xc, &xc[BUS_SAMPLES], HIST * sizeof(float));
     }
     for (int i = 0; i < FRAME_SAMPLES; i++) {
         quad[i * ADC_CHANNELS + 2] = 0;   // the unused input
     }
 }
 
-static void mic_task(void *arg)
+// The I2S task only drains the DMA ring (40 ms) into s_bus (PSRAM, 0.5 s),
+// so the mic task's processing (decimation, the front end's AEC) can run
+// late now and then without losing audio.
+#define BUS_FRAME_BYTES (BUS_SAMPLES * ADC_CHANNELS * sizeof(int16_t))   // 80 ms of the bus
+#define I2S_CHUNK_BYTES (BUS_FRAME_BYTES / 4)                           // 20 ms
+static StreamBufferHandle_t s_bus;
+
+static void i2s_task(void *arg)
 {
     esp_codec_dev_handle_t mic = arg;
-    int16_t *bus = heap_caps_malloc(BUS_SAMPLES * ADC_CHANNELS * sizeof(int16_t), MALLOC_CAP_SPIRAM);
+    uint8_t *chunk = heap_caps_malloc(I2S_CHUNK_BYTES, MALLOC_CAP_SPIRAM);
+    while (true) {
+        if (esp_codec_dev_read(mic, chunk, I2S_CHUNK_BYTES) != ESP_CODEC_DEV_OK) {
+            ESP_LOGW(TAG, "mic read failed");
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
+        }
+        if (xStreamBufferSend(s_bus, chunk, I2S_CHUNK_BYTES, 0) != I2S_CHUNK_BYTES) {
+            s_n_dropped++;   // the mic task is half a second behind
+        }
+    }
+}
+
+static void mic_task(void *arg)
+{
+    int16_t *bus = heap_caps_malloc(BUS_FRAME_BYTES, MALLOC_CAP_SPIRAM);
     static int16_t quad[FRAME_SAMPLES * ADC_CHANNELS];
     static int16_t mono[FRAME_SAMPLES];
     double sumsq[ADC_CHANNELS] = {0};
@@ -529,12 +570,12 @@ static void mic_task(void *arg)
     int frames = 0;
     fir_init();
     while (true) {
-        if (esp_codec_dev_read(mic, bus, BUS_SAMPLES * ADC_CHANNELS * sizeof(int16_t)) != ESP_CODEC_DEV_OK) {
-            ESP_LOGW(TAG, "mic read failed");
-            vTaskDelay(pdMS_TO_TICKS(100));
-            continue;
+        for (size_t got = 0; got < BUS_FRAME_BYTES;) {
+            got += xStreamBufferReceive(s_bus, (uint8_t *)bus + got, BUS_FRAME_BYTES - got, portMAX_DELAY);
         }
+        int64_t t0 = esp_timer_get_time();
         decimate(bus, quad);
+        s_us_decim += esp_timer_get_time() - t0;
         for (int i = 0; i < FRAME_SAMPLES; i++) {
             const int16_t *f = &quad[ADC_CHANNELS * i];
             mono[i] = MUTED() ? 0 : (int16_t)(((int32_t)f[MIC_A] + f[MIC_B]) / 2);
@@ -556,18 +597,33 @@ static void mic_task(void *arg)
                 sumsq[c] = 0;
                 peak[c] = 0;
             }
+            // Load: wall time for these frames (60 s if none were lost at the
+            // I2S DMA), ms per frame decimating and feeding the front end, and
+            // frames out of the front end, sent, and dropped (stream full).
+            static int64_t since;
+            int64_t now = esp_timer_get_time();
+            snprintf(&s_levels[n], sizeof(s_levels) - n, " wall=%.1fs dec=%.2fms feed=%.2fms out=%u sent=%u drop=%u",
+                     since ? (now - since) / 1e6 : 0.0, s_us_decim / 1000.0 / frames, s_us_feed / 1000.0 / frames,
+                     (unsigned)s_n_afe_out, (unsigned)s_n_sent, (unsigned)s_n_dropped);
+            since = now;
+            s_us_decim = s_us_feed = 0;
+            s_n_afe_out = s_n_sent = s_n_dropped = 0;
             frames = 0;
             if (s_event_task) {
                 xTaskNotify(s_event_task, EVENT_LEVELS, eSetBits);
             }
         }
         if (s_afe) {
+            int64_t t1 = esp_timer_get_time();
             afe_feed(quad);   // the AFE task streams its output
+            s_us_feed += esp_timer_get_time() - t1;
             continue;
         }
         // Never block: if the network is behind, drop this frame.
         if (xStreamBufferSpacesAvailable(s_audio) >= FRAME_BYTES) {
             xStreamBufferSend(s_audio, mono, FRAME_BYTES, 0);
+        } else {
+            s_n_dropped++;
         }
     }
 }
@@ -599,18 +655,20 @@ static int tcp_open(void)
     // If Taco stops reading, fail the send rather than hang forever.
     struct timeval tv = {.tv_sec = 5};
     setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-    // The receive task wakes at least this often, to notice a closed socket.
-    struct timeval rtv = {.tv_sec = 1};
-    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &rtv, sizeof(rtv));
     return sock;
 }
+
+// Why the last connection ended, for the next handshake (taco-voice logs it).
+static char s_lost[24] = "none";
 
 static int taco_connect(void)
 {
     int sock = tcp_open();
-    char hello[160];
-    snprintf(hello, sizeof(hello), "TACO %s %s afe=%s ch=%d spk=%d\n", SAT_NAME, SAT_TOKEN, s_afe_status,
-             s_out_ch, s_spk ? I2S_RATE : 0);   // spk = the rate it plays at
+    char hello[200];
+    // spk = the rate it plays at; boot/up/lost are for diagnosis.
+    snprintf(hello, sizeof(hello), "TACO %s %s afe=%s ch=%d spk=%d boot=%d up=%lld lost=%s\n", SAT_NAME,
+             SAT_TOKEN, s_afe_status, s_out_ch, s_spk ? I2S_RATE : 0, (int)esp_reset_reason(),
+             esp_timer_get_time() / 1000000, s_lost);
     if (sock >= 0 && send(sock, hello, strlen(hello), 0) < 0) {
         close(sock);
         return -1;
@@ -726,8 +784,18 @@ static void rx_task(void *arg)
         bool to_music = false;
         int carry = -1;
         while (s_rx_sock == sock) {
-            int n = recv(sock, buf, sizeof(buf), 0);
+            // Wait with select, not SO_RCVTIMEO: lwIP's receive timeout left the
+            // socket reporting ENOTCONN after a few seconds of quiet.
+            fd_set rd;
+            FD_ZERO(&rd);
+            FD_SET(sock, &rd);
+            struct timeval tv = {.tv_sec = 0, .tv_usec = 250000};
+            if (select(sock + 1, &rd, NULL, NULL, &tv) <= 0) {
+                continue;   // quiet (or interrupted); check the socket is still ours
+            }
+            int n = recv(sock, buf, sizeof(buf), MSG_DONTWAIT);
             if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
+                snprintf(s_lost, sizeof(s_lost), "rx:%d:%d", n, n < 0 ? errno : 0);
                 s_rx_dead = true;
                 break;
             }
@@ -804,7 +872,9 @@ static void net_task(void *arg)
             if (got == 0) {
                 continue;
             }
+            s_n_sent++;
             if (!send_all(sock, frame, got)) {
+                snprintf(s_lost, sizeof(s_lost), "tx:%d", errno);
                 break;
             }
         }
@@ -956,7 +1026,7 @@ static bool send_event(const char *what)
     }
     struct timeval tv = {.tv_sec = 5};
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    char line[192];
+    char line[320];
     snprintf(line, sizeof(line), "TACO-EVENT %s %s %s\n", SAT_NAME, SAT_TOKEN, what);
     bool ok = send_all(sock, (const uint8_t *)line, strlen(line)) && recv_line(sock, line, sizeof(line))
               && strcmp(line, "OK") == 0;
@@ -976,8 +1046,10 @@ static void event_task(void *arg)
             todo &= ~EVENT_MUTE;
         }
         if (todo & EVENT_LEVELS) {
-            char what[112];
-            snprintf(what, sizeof(what), "LEVELS%s", s_levels);
+            char what[256];
+            snprintf(what, sizeof(what), "LEVELS%s heap=%uK/%uK", s_levels,
+                     (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
+                     (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) / 1024));
             send_event(what);              // a missed report doesn't matter
             todo &= ~EVENT_LEVELS;
         }
@@ -1106,7 +1178,8 @@ void app_main(void)
 
     ota_boot_state();
     load_settings();
-    s_audio = xStreamBufferCreate(STREAM_BYTES, FRAME_BYTES);
+    // In PSRAM: internal RAM is what Wi-Fi, lwIP and the I2S DMA need.
+    s_audio = xStreamBufferCreateWithCaps(STREAM_BYTES, FRAME_BYTES, MALLOC_CAP_SPIRAM);
     esp_codec_dev_handle_t mic = mic_start();
     if (s_spk) {
         s_play = xStreamBufferCreateWithCaps(PLAY_BYTES, 2, MALLOC_CAP_SPIRAM);
@@ -1127,7 +1200,11 @@ void app_main(void)
         }
     }
     wifi_start();
-    xTaskCreatePinnedToCore(mic_task, "mic", 4096, mic, 6, NULL, 1);
+    // Core 0: reading I2S, decimating and feeding the front end (its AEC runs
+    // in feed). Core 1 has the front end's fetch side (BSS) and the speaker.
+    s_bus = xStreamBufferCreateWithCaps(BUS_FRAME_BYTES * 6, I2S_CHUNK_BYTES, MALLOC_CAP_SPIRAM);
+    xTaskCreatePinnedToCore(i2s_task, "i2s", 3072, mic, 8, NULL, 0);
+    xTaskCreatePinnedToCore(mic_task, "mic", 4096, NULL, 6, NULL, 0);
     xTaskCreatePinnedToCore(net_task, "net", 4096, NULL, 5, NULL, 0);
     xTaskCreatePinnedToCore(rx_task, "rx", 4096, NULL, 5, NULL, 0);
     xTaskCreatePinnedToCore(ota_task, "ota", 6144, NULL, 3, &s_ota_task, 0);

@@ -169,7 +169,7 @@ class NetworkMicrophone(_FrameSource):
     """A mic satellite in another room (see satellite/README.md).
 
     The satellite connects over TCP, sends one handshake line
-    `TACO <name> <token> [afe=on|off] [ch=1|2]`, then streams raw 16 kHz s16
+    `TACO <name> <token> [afe=on|off] [ch=1|2] [spk=<rate>]`, then streams raw 16 kHz s16
     audio: mono, or with ch=2 two interleaved channels, the second of which
     goes to `self.second`. Only one connection is live at a time: a new one
     (the satellite restarting) replaces the old, which may be a half-open
@@ -339,7 +339,7 @@ class NetworkMicrophone(_FrameSource):
         """The handshake line's words, if the token is right."""
         conn.settimeout(5.0)
         line = b""
-        while not line.endswith(b"\n") and len(line) < 256:
+        while not line.endswith(b"\n") and len(line) < 512:
             byte = conn.recv(1)
             if not byte:
                 return None
@@ -402,9 +402,10 @@ class NetworkMicrophone(_FrameSource):
                 self.speaker, self.speaker_rate = _speaker_option(opts.get("spk"))
             if old:
                 _close(old)
-            log.info("satellite %r: connected from %s%s", self.name, ip,
+            extra = " ".join(f"{k}={v}" for k, v in opts.items() if k not in ("afe", "ch", "spk"))
+            log.info("satellite %r: connected from %s%s%s", self.name, ip,
                      (f" (speech front end {self.afe}, {channels} ch{', speaker' if self.speaker else ''})"
-                      if self.afe else ""))
+                      if self.afe else ""), f" [{extra}]" if extra else "")
             if self.on_connect:
                 self.on_connect(self)
             stream = conn.makefile("rb")
