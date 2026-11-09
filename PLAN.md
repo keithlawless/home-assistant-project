@@ -212,3 +212,19 @@ A common `TTSEngine` interface streams sentence by sentence, so speech starts be
     (`aec_init` in `afe_start()`). Until then, Taco ignores the living-room
     mic while it talks there.
   - Ongoing: retrain the wake verifier as front-end clips accumulate.
+- **Pause the living-room TV during turns: done** (#18, #21, 2026-11-09).
+  A turn taken on a living-room mic pauses the Apple TV (192.168.4.44,
+  paired over Companion and AirPlay via pyatv), but only if it's playing.
+  The TV resumes when the reply ends. It pauses rather than mutes: pyatv
+  reports Volume and SetVolume as unavailable, because CEC gives only
+  relative up/down. See `taco/voice/tv.py` and `[tv]` in the config.
+  - DirecTV's pause ads: about 25 s into a pause, the app plays an ad that
+    the Apple TV reports as the program Playing again, with the same title,
+    hash and position. On that app "play" is a toggle. So a switch to
+    Playing at least `pause_ad_after_s` (20 s) after Taco's pause counts as
+    an ad: Taco sends play to dismiss it, then play again to resume. A
+    switch sooner than that means someone pressed play, and Taco leaves it.
+    Tested live.
+  - pyatv holds its listeners by weak reference, so `TvPauser` keeps them
+    alive. The Apple TV takes one connection per paired identity, so stop
+    taco-voice before running another pyatv client against it.
