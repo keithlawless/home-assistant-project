@@ -199,7 +199,8 @@ class VoiceLoop:
         self.alarm = AlarmPlayer(Speaker(audio["output_device"]), self.synthesize)
         self.core = CoreLink(cfg["core"]["url"], self._on_core_message)
         tv = cfg["tv"]
-        self.tv = TvPauser(tv["apple_tv"], tv["rooms"], tv["marker"], tv["resume_within_s"]) if tv["apple_tv"] else None
+        self.tv = (TvPauser(tv["apple_tv"], tv["rooms"], tv["marker"], tv["resume_within_s"], tv["pause_ad_after_s"])
+                   if tv["apple_tv"] else None)
 
     def _wake_for(self, room: str, mic_name: str | None = None) -> WakeWord:
         w = self.cfg["wake"]

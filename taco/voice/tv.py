@@ -14,6 +14,15 @@ The Apple TV must be paired once (Companion and AirPlay) with pyatv's
 README). A marker file remembers a pause that Taco made, so if taco-voice
 restarts mid-turn it resumes the TV at startup. That happens only if the
 pause is recent, so the TV doesn't start up by surprise hours later.
+
+Pause ads (DirecTV, measured 2026-11-09): about 25 s into a pause the app
+plays an ad, which the Apple TV reports as the program Playing again, with
+the same title, hash and position. On that app "play" acts as a toggle: over
+the ad it returns to the paused program, and on the playing program it
+pauses. So at the end of a long turn a switch to Playing that came at least
+pause_ad_after_s after Taco's pause counts as an ad. Taco sends play, and
+play again once the TV is back to Paused. A switch to Playing sooner than
+that is someone pressing play, and is left alone.
 """
 
 from __future__ import annotations
@@ -31,15 +40,21 @@ RECONNECT_S = (5, 15, 60, 300)   # backoff while the TV is off or unreachable
 
 
 class TvPauser:
-    def __init__(self, host: str, rooms: list[str], marker: str | Path, resume_within_s: float = 600):
+    def __init__(self, host: str, rooms: list[str], marker: str | Path, resume_within_s: float = 600,
+                 pause_ad_after_s: float = 20):
         self.host = host
         self.rooms = set(rooms)
         self.marker = Path(marker)
         self.resume_within_s = resume_within_s
+        self.pause_ad_after_s = pause_ad_after_s
         self._loop = asyncio.new_event_loop()
         self._atv = None
         self._connected = asyncio.Event()
-        self._paused_by_us = False   # owned by the asyncio thread
+        # All owned by the asyncio thread:
+        self._paused_by_us = False
+        self._paused_at: float | None = None      # monotonic time of Taco's pause
+        self._playing_since: float | None = None  # last switch to Playing, from push updates
+        self._last_state: str | None = None
 
     def start(self) -> None:
         threading.Thread(target=self._loop.run_forever, daemon=True, name="tv").start()
@@ -57,9 +72,12 @@ class TvPauser:
     # -- the asyncio side ---------------------------------------------------------
 
     async def _run(self) -> None:
+        # A restart mid-turn left a marker: resume what we paused, if it was
+        # just now, once connected. Only at startup: a reconnect during a turn
+        # leaves the resume to the turn's end.
+        resume_at_start = False
         if self._marker_age() is not None:
-            # A restart mid-turn: resume what we paused, if it was just now.
-            self._paused_by_us = self._marker_age() < self.resume_within_s
+            resume_at_start = self._paused_by_us = self._marker_age() < self.resume_within_s
             if not self._paused_by_us:
                 self._clear_marker()
         tries = 0
@@ -67,7 +85,8 @@ class TvPauser:
             try:
                 await self._connect()
                 tries = 0
-                if self._paused_by_us:
+                if resume_at_start:
+                    resume_at_start = False
                     await self._resume()
                 await self._lost.wait()
             except Exception as e:   # unreachable, asleep, not paired...
@@ -96,7 +115,22 @@ class TvPauser:
             def connection_closed(self):
                 lost.set()
 
-        atv.listener = Listener()
+        # pyatv holds listeners by weak reference only, so keep ours alive here
+        # (an inline Listener() was collected at once: no reconnects, no updates).
+        self._listener = Listener()
+        atv.listener = self._listener
+        pauser = self
+
+        class Push:   # live play-state updates, to time a switch to Playing
+            def playstatus_update(self, updater, playing):
+                pauser._on_state(playing.device_state.name)
+
+            def playstatus_error(self, updater, exception):
+                pass
+
+        self._push = Push()
+        atv.push_updater.listener = self._push
+        atv.push_updater.start()
         self._atv = atv
         self._connected.set()
         log.info("apple tv %s: connected", self.host)
@@ -118,6 +152,25 @@ class TvPauser:
                 return state
             await asyncio.sleep(0.25)
 
+    def _on_state(self, state: str) -> None:
+        if state == "Playing" and self._last_state != "Playing":
+            self._playing_since = time.monotonic()
+        self._last_state = state
+
+    async def _wait_for(self, atv, state: str, timeout_s: float) -> bool:
+        end = time.monotonic() + timeout_s
+        while time.monotonic() < end:
+            if await self._state(atv) == state:
+                return True
+            await asyncio.sleep(0.25)
+        return False
+
+    def _pause_ad_likely(self) -> bool:
+        """Playing again, long enough after Taco's pause to be a pause ad
+        rather than someone pressing play."""
+        return (self._paused_at is not None and self._playing_since is not None
+                and self._playing_since - self._paused_at >= self.pause_ad_after_s)
+
     async def _pause(self) -> None:
         if self._paused_by_us:
             return   # a follow-up in the same turn: it's ours already
@@ -130,6 +183,7 @@ class TvPauser:
                 return   # paused or idle already: leave it alone
             await atv.remote_control.pause()
             self._paused_by_us = True
+            self._paused_at, self._playing_since = time.monotonic(), None
             self._write_marker()
             log.info("apple tv %s: paused for the turn", self.host)
         except Exception as e:
@@ -147,12 +201,20 @@ class TvPauser:
             if state == "Paused":
                 await atv.remote_control.play()
                 log.info("apple tv %s: resumed", self.host)
+            elif state == "Playing" and self._pause_ad_likely():
+                # Play dismisses the ad back to the paused program; play again resumes it.
+                await atv.remote_control.play()
+                if await self._wait_for(atv, "Paused", 3.0):
+                    await atv.remote_control.play()
+                log.info("apple tv %s: resumed past a pause ad (playing again %.0f s after the pause)",
+                         self.host, self._playing_since - self._paused_at)
             else:
                 log.info("apple tv %s: not resuming, it's %s now", self.host, state)
         except Exception as e:
             log.info("apple tv %s: resume failed: %s", self.host, e)
             return
         self._paused_by_us = False
+        self._paused_at = self._playing_since = None
         self._clear_marker()
 
     def _marker_age(self) -> float | None:
