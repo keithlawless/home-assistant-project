@@ -262,3 +262,25 @@ def test_log_only_verifier_leaves_threshold_in_charge():
 def test_enforce_without_verifier_falls_back_to_threshold():
     t = Scripted([0.4, 0.9, 0.95], patience=2, near_miss=0.3, enforce=True)
     assert t.run(3) == [None, None, 0.95]
+
+
+def test_satellite_channels_waiting_together_keep_the_stronger(caplog):
+    """Both channels of a satellite's front end can hear the same words; the
+    one that scored higher is the one that waits (and may fire)."""
+    from taco.voice.main import VoiceLoop
+
+    loop = VoiceLoop.__new__(VoiceLoop)
+    loop.cfg = {"wake": {"local_priority_db": 10.0, "local_defer_s": 0.8, "local_listen_db": 15.0}}
+    loop.clips = None
+    loop.muted = False
+    loop._deferred = None
+    kitchen = Scripted([0.0] * 20)
+    ch1, ch2 = Scripted([0.6] + [0.0] * 20), Scripted([0.9] + [0.0] * 20)
+    mic = FakeMic("kitchen", [np.full(FRAME_SAMPLES, 1200, dtype=np.int16)])
+    sat1 = FakeMic("living room", [np.full(FRAME_SAMPLES, 300, dtype=np.int16)])
+    sat2 = FakeMic("living room 2", [np.full(FRAME_SAMPLES, 300, dtype=np.int16)])
+    loop.listeners = [(mic, kitchen), (sat1, ch1), (sat2, ch2)]
+    assert loop._detect_wake(now=0.0) is None
+    assert loop._deferred["listener"][0] is sat2 and loop._deferred["score"] == 0.9
+    score, detector, listener = loop._detect_wake(now=1.0)
+    assert score == 0.9 and detector[0] is sat2 and listener[0] is sat2

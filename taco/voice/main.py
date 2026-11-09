@@ -28,7 +28,7 @@ from taco.voices import DEFAULT_VOICE, PREVIEW_TEXT
 
 from .alarm import AlarmPlayer
 from .clips import ClipRecorder
-from .audio import Microphone, NetworkMicrophone, Speaker, tone
+from .audio import Microphone, NetworkMicrophone, SatelliteChannel, Speaker, tone
 from .core_link import CoreLink
 from .hermes import HermesClient, asks_question
 from .listen import record_request
@@ -122,6 +122,26 @@ def satellite_firmware(name: str) -> str:
     return str(TACO_HOME / "satellite" / f"{name.replace(' ', '_')}.bin")
 
 
+def satellite_afe_file(name: str) -> str:
+    """Where deploy/satellite-afe.sh says whether a satellite's speech front end is on."""
+    return str(TACO_HOME / "satellite" / f"{name.replace(' ', '_')}.afe")
+
+
+def _is_satellite(mic) -> bool:
+    return isinstance(mic, (NetworkMicrophone, SatelliteChannel))
+
+
+def _clip_tags(mic) -> dict:
+    """Whether a satellite clip came through its speech front end."""
+    sat = mic.parent if isinstance(mic, SatelliteChannel) else mic
+    return {"afe": sat.afe} if isinstance(sat, NetworkMicrophone) and sat.afe else {}
+
+
+def _room(mic) -> str:
+    """The room a mic is in: a satellite's second channel shares its room's tuning."""
+    return mic.parent.name if isinstance(mic, SatelliteChannel) else mic.name
+
+
 class VoiceLoop:
     def __init__(self, cfg: dict):
         self.cfg = cfg
@@ -131,11 +151,15 @@ class VoiceLoop:
         mics += [
             NetworkMicrophone(s["name"], s["port"], s["token"], s.get("allow"), ready=self.ready,
                               firmware=s.get("firmware", satellite_firmware(s["name"])),
-                              on_connect=self._sync_satellite)
+                              on_connect=self._sync_satellite,
+                              afe_file=s.get("afe_file", satellite_afe_file(s["name"])))
             for s in audio["satellites"]
         ]
+        # A satellite running its speech front end streams two separated
+        # channels; each gets a wake model, and stays quiet otherwise.
+        mics += [mic.second for mic in mics if isinstance(mic, NetworkMicrophone)]
         # openWakeWord keeps a rolling window per stream, so one model per mic.
-        self.listeners = [(mic, self._wake_for(mic.name)) for mic in mics]
+        self.listeners = [(mic, self._wake_for(_room(mic), mic.name)) for mic in mics]
         w = cfg["wake"]
         self.clips = ClipRecorder(w["clips_dir"], w["max_clips"]) if w["save_clips"] else None
         self._wake_clip: dict | None = None   # the current wake, until its request is heard
@@ -162,7 +186,7 @@ class VoiceLoop:
         self.alarm = AlarmPlayer(Speaker(audio["output_device"]), self.synthesize)
         self.core = CoreLink(cfg["core"]["url"], self._on_core_message)
 
-    def _wake_for(self, room: str) -> WakeWord:
+    def _wake_for(self, room: str, mic_name: str | None = None) -> WakeWord:
         w = self.cfg["wake"]
         tune = w["rooms"].get(room, {})
         # The verifier scores candidates from the near-miss floor up, so it needs one.
@@ -171,7 +195,7 @@ class VoiceLoop:
         wake = WakeWord(w["model"], w["threshold"], tune.get("offset", 0.0), tune.get("patience", w["patience"]),
                         floor, verifier, w["verifier_threshold"], w["verifier_enforce"])
         log.info("wake word %s for %s: threshold %.2f, patience %d",
-                 wake.name, room, wake.threshold, wake.patience)
+                 wake.name, mic_name or room, wake.threshold, wake.patience)
         return wake
 
     # -- voice and settings ------------------------------------------------------
@@ -284,7 +308,7 @@ class VoiceLoop:
                 self._wake_clip = {"room": mic.name, "audio": audio, "info": {
                     "score": round(score, 3), "threshold": round(wake.threshold, 3),
                     "patience": wake.patience, "preroll_s": round(len(audio) / 16000, 2),
-                    "scores": scores, **_verified_info(verified),
+                    "scores": scores, **_verified_info(verified), **_clip_tags(mic),
                     **({} if local else {"local_margin_db": margin}),
                     **({} if self.active[0] is mic else {"request_mic": self.active[0].name}),
                 }}
@@ -308,7 +332,8 @@ class VoiceLoop:
         """`STATE <state> here|elsewhere`: whether this satellite has the turn."""
         if self.state == "idle":
             return "STATE idle"
-        return f"STATE {self.state} {'here' if self.active[0] is sat else 'elsewhere'}"
+        here = self.active[0] is sat or self.active[0] is sat.second
+        return f"STATE {self.state} {'here' if here else 'elsewhere'}"
 
     def _set_state(self, state: str) -> None:
         self.state = state
@@ -336,6 +361,13 @@ class VoiceLoop:
         margin = self._local_margin(wake)
         if margin < limit:
             return False
+        if self._deferred:
+            # The satellite's other channel heard the same words and is
+            # already waiting: keep whichever scored higher.
+            if score <= self._deferred["score"]:
+                wake.reset()
+                return True
+            self._deferred["listener"][1].reset()
         log.info("wake word (%.2f, %s) waits: %s heard it %.0f dB louder",
                  score, mic.name, self.listeners[0][0].name, margin)
         self._deferred = {"score": score, "listener": (mic, wake), "margin": margin,
@@ -355,7 +387,7 @@ class VoiceLoop:
                 "peak": round(d["score"], 3), "threshold": round(wake.threshold, 3),
                 "patience": wake.patience, "scores": scores,
                 "ignored": f"local mic {d['margin']:.0f} dB louder",
-                **_verified_info(wake.last_verified),
+                **_verified_info(wake.last_verified), **_clip_tags(mic),
             })
         wake.reset()
 
@@ -396,7 +428,7 @@ class VoiceLoop:
                         self.clips.save("near_miss", mic.name, miss.audio, {
                             "peak": round(miss.peak, 3), "threshold": round(wake.threshold, 3),
                             "frames_above": miss.frames, "patience": wake.patience,
-                            "scores": miss.scores, **_verified_info(miss.verified),
+                            "scores": miss.scores, **_verified_info(miss.verified), **_clip_tags(mic),
                             **({} if local else {"local_margin_db": margin}),
                         })
                 if score is not None and self._defer_to_local(mic, wake, score, now):
@@ -422,6 +454,7 @@ class VoiceLoop:
                 mic.check_stall()
             for sat in self._satellites():
                 sat.check_firmware()
+                sat.check_afe()
 
     def _clip_request(self, audio: np.ndarray | None, text: str | None) -> None:
         """Save the current wake's clip with the request that followed it
@@ -449,7 +482,7 @@ class VoiceLoop:
         """One wake: a request, plus follow-ups while Taco keeps asking questions
         or keeps being interrupted."""
         start_timeout = self.cfg["listen"]["start_timeout_s"]
-        satellite = isinstance(self.active[0], NetworkMicrophone)
+        satellite = _is_satellite(self.active[0])
         vad = self.cfg["listen"]["satellite_vad_aggressiveness" if satellite else "vad_aggressiveness"]
         while True:
             self._play_and_wait(WAKE_CHIME, 22050)
@@ -542,7 +575,7 @@ class VoiceLoop:
     def _play_and_wait(self, audio, rate) -> None:
         self.speaker.play(audio, rate)
         self.speaker.wait()
-        if isinstance(self.active[0], NetworkMicrophone):
+        if _is_satellite(self.active[0]):
             # A satellite's audio arrives a few hundred ms late, so the end of
             # the chime would land after the flush and pass for speech.
             time.sleep(self.cfg["listen"]["satellite_lag_s"])

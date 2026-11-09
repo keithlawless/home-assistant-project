@@ -120,19 +120,40 @@ class Microphone(_FrameSource):
             threading.Event().wait(1.0)
 
 
+class SatelliteChannel(_FrameSource):
+    """The second channel of a satellite that streams two (its speech front
+    end's separated sources). It gets its own wake model, like any mic, so
+    whichever channel holds the speaker's voice wins the wake."""
+
+    def __init__(self, parent: "NetworkMicrophone", ready: threading.Event | None = None):
+        super().__init__(f"{parent.name} 2", ready)
+        self.parent = parent
+
+    def start(self) -> None:
+        """Nothing to start: the parent's connection feeds it."""
+
+    @property
+    def live(self) -> bool:
+        return self.parent.connected and self.parent.channels == 2
+
+
 class NetworkMicrophone(_FrameSource):
     """A mic satellite in another room (see satellite/README.md).
 
     The satellite connects over TCP, sends one handshake line
-    `TACO <name> <token>`, then streams raw 16 kHz mono s16 audio. Only one
-    connection is live at a time: a new one (the satellite restarting)
-    replaces the old, which may be a half-open socket nobody will close.
+    `TACO <name> <token> [afe=on|off] [ch=1|2]`, then streams raw 16 kHz s16
+    audio: mono, or with ch=2 two interleaved channels, the second of which
+    goes to `self.second`. Only one connection is live at a time: a new one
+    (the satellite restarting) replaces the old, which may be a half-open
+    socket nobody will close.
 
     Taco also writes short control lines down the live connection, which
     the satellite reads between frames (older firmware ignores them):
     `STATE <idle|listening|thinking|speaking> [here|elsewhere]`, `MUTE on|off`
-    and `UPDATE` (check for firmware now). `on_connect` runs for each new
-    connection, so the caller can resend the current state.
+    `UPDATE` (check for firmware now) and `AFE on|off` (switch the board's
+    speech front end, which restarts it; sent when `afe_file` changes, and
+    on connect when it disagrees with the handshake). `on_connect` runs for
+    each new connection, so the caller can resend the current state.
 
     A satellite reports its own mute button the same way, on a short
     connection: `TACO-EVENT <name> <token> MUTE on|off`, answered `OK`
@@ -150,7 +171,8 @@ class NetworkMicrophone(_FrameSource):
 
     def __init__(self, name: str, port: int, token: str, allow: list[str] | None = None,
                  host: str = "0.0.0.0", ready: threading.Event | None = None,
-                 firmware: str | Path | None = None, on_connect=None):
+                 firmware: str | Path | None = None, on_connect=None,
+                 afe_file: str | Path | None = None):
         super().__init__(name, ready)
         if not token:
             raise ValueError(f"satellite {name!r} needs a token")
@@ -165,6 +187,13 @@ class NetworkMicrophone(_FrameSource):
         self._fw_mtime: float | None = None
         self.on_connect = on_connect
         self.button_muted: bool | None = None   # unknown until the satellite says
+        # What the live connection's handshake said: front end on, channels.
+        self.afe: str | None = None
+        self.channels = 1
+        self.second = SatelliteChannel(self, ready)
+        # Holds "on" or "off" to switch the speech front end (deploy/satellite-afe.sh).
+        self.afe_file = Path(afe_file) if afe_file else None
+        self._afe_want = self._afe_wanted()
         # Control lines go out on their own thread, so a slow socket never
         # holds up the voice loop.
         self._out: queue.Queue[str] = queue.Queue(maxsize=50)
@@ -223,6 +252,29 @@ class NetworkMicrophone(_FrameSource):
             log.info("satellite %r: new firmware image; asking it to update", self.name)
             self.send_line("UPDATE")
 
+    def _afe_wanted(self) -> str | None:
+        try:
+            want = self.afe_file.read_text().strip() if self.afe_file else ""
+        except OSError:
+            return None
+        return want if want in ("on", "off") else None
+
+    def check_afe(self) -> None:
+        """Ask the board to switch its speech front end when the AFE file
+        disagrees with what its handshake said. Firmware that predates the
+        front end says nothing, and a board whose front end failed to start
+        says afe=failed; both are left alone, so a board never restarts in
+        a loop."""
+        want = self._afe_wanted()
+        if want != self._afe_want:
+            self._afe_want = want
+            if want:
+                log.info("satellite %r: speech front end wanted %s", self.name, want)
+        if want and self.connected and self.afe in ("on", "off") and self.afe != want:
+            log.info("satellite %r: switching its speech front end %s (it restarts)", self.name, want)
+            self.send_line(f"AFE {want}")
+            self.afe = want   # the next handshake says what took
+
     def _allowed(self, ip: str) -> bool:
         if not self._allow:
             return True
@@ -248,7 +300,7 @@ class NetworkMicrophone(_FrameSource):
                 return None
             line += byte
         parts = line.decode(errors="replace").split()
-        ok = ((len(parts) == 3 and parts[0] == "TACO") or (len(parts) == 4 and parts[0] == "TACO-OTA")
+        ok = ((len(parts) >= 3 and parts[0] == "TACO") or (len(parts) == 4 and parts[0] == "TACO-OTA")
               or (len(parts) >= 4 and parts[0] == "TACO-EVENT"))
         return parts if ok and hmac.compare_digest(parts[2].encode(), self._token.encode()) else None
 
@@ -295,20 +347,30 @@ class NetworkMicrophone(_FrameSource):
             conn.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
             # Control lines give up rather than block on a stuck satellite.
             conn.setsockopt(socket.SOL_SOCKET, socket.SO_SNDTIMEO, struct.pack("ll", 2, 0))
+            opts = dict(w.split("=", 1) for w in parts[3:] if "=" in w)
+            channels = 2 if opts.get("ch") == "2" else 1
             with self._lock:
                 self.last_frame = time.monotonic()   # don't count the time it was away
+                self.second.last_frame = self.last_frame
                 old, self._conn = self._conn, conn
+                self.afe, self.channels = opts.get("afe"), channels
             if old:
                 _close(old)
-            log.info("satellite %r: connected from %s", self.name, ip)
+            log.info("satellite %r: connected from %s%s", self.name, ip,
+                     f" (speech front end {self.afe}, {channels} ch)" if self.afe else "")
             if self.on_connect:
                 self.on_connect(self)
             stream = conn.makefile("rb")
-            frame_bytes = FRAME_SAMPLES * 2
+            frame_bytes = FRAME_SAMPLES * 2 * channels
             while len(chunk := stream.read(frame_bytes)) == frame_bytes:
                 if self._conn is not conn:
                     break   # replaced by a newer connection
-                self._put(chunk)
+                if channels == 1:
+                    self._put(chunk)
+                else:
+                    both = np.frombuffer(chunk, dtype=np.int16)
+                    self._put(both[0::2].tobytes())
+                    self.second._put(both[1::2].tobytes())
         except OSError as e:
             log.info("satellite %r: %s", self.name, e)
         finally:

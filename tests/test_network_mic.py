@@ -217,6 +217,7 @@ def test_new_firmware_image_asks_satellite_to_update(tmp_path):
 class FakeSat:
     def __init__(self):
         self.lines = []
+        self.second = object()   # its front end's second channel
 
     def send_line(self, line):
         self.lines.append(line)
@@ -286,3 +287,66 @@ def test_levels_event_is_logged(caplog):
     mic = start_mic()
     assert send_event(mic, "LEVELS -70/-50 -48/-20 -90/-90 -47/-19") == b"OK\n"
     assert "channel levels (rms/peak dBFS) -70/-50 -48/-20 -90/-90 -47/-19" in caplog.text
+
+
+# -- the speech front end: two channels, switched by a file --------------------
+
+def connect_with(mic, extra: str) -> socket.socket:
+    sock = socket.create_connection(("127.0.0.1", mic.port))
+    sock.sendall(f"TACO living_room s3cret {extra}\n".encode())
+    return sock
+
+
+def test_two_channel_stream_splits_into_second_source():
+    mic = start_mic()
+    a, b = FRAME, (FRAME[::-1]).copy()
+    both = np.empty(FRAME_SAMPLES * 2, dtype=np.int16)
+    both[0::2], both[1::2] = a, b
+    with connect_with(mic, "afe=on ch=2") as sock:
+        sock.sendall(both.tobytes())
+        assert np.array_equal(mic.read(timeout=2), a)
+        assert np.array_equal(mic.second.read(timeout=2), b)
+        assert mic.afe == "on" and mic.channels == 2
+        assert mic.second.live and mic.second.name == "living room 2"
+
+
+def test_mono_stream_leaves_second_channel_idle():
+    mic = start_mic()
+    with connect_with(mic, "afe=off ch=1") as sock:
+        sock.sendall(FRAME.tobytes())
+        assert np.array_equal(mic.read(timeout=2), FRAME)
+        assert mic.afe == "off" and not mic.second.live
+        assert mic.second.read_nowait() is None
+
+
+def sent_lines(mic) -> list[str]:
+    lines = []
+    while not mic._out.empty():
+        lines.append(mic._out.get_nowait())
+    return lines
+
+
+def test_afe_file_switches_the_board(tmp_path):
+    afe = tmp_path / "living_room.afe"
+    mic = NetworkMicrophone("living room", 0, "s3cret", host="127.0.0.1", afe_file=afe)
+    mic._conn = object()   # connected, as far as check_afe cares
+    mic._send_lines = lambda: None
+    mic.afe = "off"
+    mic.check_afe()
+    assert sent_lines(mic) == []          # no file: leave the board as it is
+    afe.write_text("on\n")
+    mic.check_afe()
+    assert sent_lines(mic) == ["AFE on"]
+    mic.check_afe()
+    assert sent_lines(mic) == []          # once; the next handshake reports the result
+
+
+@pytest.mark.parametrize("reported", [None, "failed"])
+def test_afe_never_asked_of_old_or_failed_boards(tmp_path, reported):
+    afe = tmp_path / "living_room.afe"
+    afe.write_text("on")
+    mic = NetworkMicrophone("living room", 0, "s3cret", host="127.0.0.1", afe_file=afe)
+    mic._conn = object()
+    mic.afe = reported
+    mic.check_afe()
+    assert sent_lines(mic) == []          # no restart loop
