@@ -13,3 +13,7 @@ CONFIG_SPIRAM_SPEED_80M=y
 CONFIG_ESP32S3_DATA_CACHE_64KB=y
 CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y
 CONFIG_ESP32S3_INSTRUCTION_CACHE_32KB=y
+# ESP-SR's ESP32-S3 libraries are prebuilt against newlib. IDF 6 defaults to
+# picolibc, which only partly emulates newlib, and with picolibc the image
+# crashed at boot (it rolled back).
+CONFIG_LIBC_NEWLIB=y
