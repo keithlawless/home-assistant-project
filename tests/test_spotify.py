@@ -48,6 +48,8 @@ class FakeSpotify:
             return httpx.Response(200, json={"id": "keith"})
         if path == "/me/player" and request.method == "GET":
             return httpx.Response(200, json={"device": {"name": "Taco"}, "is_playing": True, "item": TRACK})
+        if path == "/me/player/shuffle":   # what Spotify really sent back, 2026-11-09
+            return httpx.Response(200, text="7a6f2c", headers={"content-type": "text/plain"})
         return httpx.Response(204)
 
 

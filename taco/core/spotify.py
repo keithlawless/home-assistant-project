@@ -92,7 +92,14 @@ class SpotifyClient:
         if r.status_code == 403:
             raise SpotifyError("Spotify refused that (Premium, or not allowed for this app)")
         r.raise_for_status()
-        return r.json()
+        # Player commands can answer 200 with a body that isn't JSON (seen on
+        # /me/player/shuffle, 2026-11-09); only queries need one.
+        if "json" not in r.headers.get("content-type", ""):
+            return None
+        try:
+            return r.json()
+        except ValueError:
+            return None
 
     # -- devices and playback --------------------------------------------------------
 

@@ -141,6 +141,20 @@ class State:
                 log.info("spotify pause failed (%s); restarting librespot", e)
         await self.spotify.stop()
 
+    async def sync_spotify(self) -> None:
+        """librespot runs on its own, so after a taco-core restart ask Spotify
+        what Taco is playing; otherwise "pause the music" wouldn't know."""
+        if not self.spotify_api:
+            return
+        try:
+            song = await self.spotify_api.now_playing()
+        except (SpotifyError, httpx.HTTPError, OAuthError) as e:
+            log.info("spotify: couldn't check what's playing: %s", e)
+            return
+        if song:
+            self.spotify.track = {"name": song["title"], "artists": song["artist"]}
+            self.spotify.playing = song["playing"]
+
     async def play_spotify(self, thing: Playable) -> None:
         if self.media.playing:
             await self.media.stop()
@@ -418,6 +432,7 @@ async def lifespan(app: FastAPI):
     global state
     state = State()
     await state.speakers.reset()   # a Bluetooth speaker choice never outlives a restart
+    await state.sync_spotify()
     tasks = [asyncio.create_task(c) for c in (
         state.weather_loop(), state.station_loop(), state.timer_loop(), state.matter.run(), state.devices.poll_loop(),
         state.scheduler.loop(), state.alerts_loop(), state.calendar_loop(),
