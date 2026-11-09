@@ -170,3 +170,79 @@ def test_push_updates_time_the_switch_to_playing(tmp_path):
     first = p._playing_since
     p._on_state("Playing")                                    # repeats don't move it
     assert p._playing_since == first
+
+
+def test_listeners_survive_garbage_collection(tmp_path, monkeypatch):
+    """pyatv keeps listeners by weak reference; ours must stay alive."""
+    import gc
+    import weakref
+    import pyatv
+    import pyatv.storage.file_storage as fs
+
+    class Weakly:   # like pyatv's StateProducer: only a weak reference to the listener
+        _ref = None
+
+        @property
+        def listener(self):
+            return self._ref and self._ref()
+
+        @listener.setter
+        def listener(self, target):
+            self._ref = weakref.ref(target)
+
+    class PushUpdater(Weakly):
+        def start(self):
+            pass
+
+    class Conn(FakeAtv, Weakly):
+        def __init__(self):
+            super().__init__()
+            self.push_updater = PushUpdater()
+
+    conn = Conn()
+
+    class Storage:
+        async def load(self):
+            pass
+
+    async def scan(*a, **k):
+        return [object()]
+
+    async def connect(*a, **k):
+        return conn
+
+    monkeypatch.setattr(fs.FileStorage, "default_storage", staticmethod(lambda loop: Storage()))
+    monkeypatch.setattr(pyatv, "scan", scan)
+    monkeypatch.setattr(pyatv, "connect", connect)
+    p = pauser(tmp_path)
+    run(p, p._connect())
+    gc.collect()
+    assert conn.listener is not None and conn.push_updater.listener is not None
+    conn.push_updater.listener.playstatus_update(None, SimpleNamespace(device_state=SimpleNamespace(name="Playing")))
+    assert p._last_state == "Playing"
+
+
+def test_a_reconnect_mid_turn_doesnt_resume(tmp_path, monkeypatch):
+    """Only a restart (marker at startup) resumes on connect; a dropped
+    connection during a turn must leave the TV paused until the turn ends."""
+    atv = FakeDirecTv("Paused")
+    p = pauser(tmp_path)
+    p._paused_by_us = True            # mid-turn, no marker from a restart
+    connects = []
+
+    async def fake_connect():
+        connects.append(1)
+        p._atv = atv
+        p._connected.set()
+        p._lost = __import__("asyncio").Event()
+        if len(connects) == 2:
+            raise SystemExit          # stop the loop after one reconnect
+        p._lost.set()                 # the connection drops at once
+
+    monkeypatch.setattr(p, "_connect", fake_connect)
+    monkeypatch.setattr("taco.voice.tv.RECONNECT_S", (0,))
+    try:
+        run(p, p._run())
+    except SystemExit:
+        pass
+    assert len(connects) == 2 and atv.calls == []

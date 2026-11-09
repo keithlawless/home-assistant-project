@@ -72,9 +72,12 @@ class TvPauser:
     # -- the asyncio side ---------------------------------------------------------
 
     async def _run(self) -> None:
+        # A restart mid-turn left a marker: resume what we paused, if it was
+        # just now, once connected. Only at startup: a reconnect during a turn
+        # leaves the resume to the turn's end.
+        resume_at_start = False
         if self._marker_age() is not None:
-            # A restart mid-turn: resume what we paused, if it was just now.
-            self._paused_by_us = self._marker_age() < self.resume_within_s
+            resume_at_start = self._paused_by_us = self._marker_age() < self.resume_within_s
             if not self._paused_by_us:
                 self._clear_marker()
         tries = 0
@@ -82,7 +85,8 @@ class TvPauser:
             try:
                 await self._connect()
                 tries = 0
-                if self._paused_by_us:
+                if resume_at_start:
+                    resume_at_start = False
                     await self._resume()
                 await self._lost.wait()
             except Exception as e:   # unreachable, asleep, not paired...
@@ -111,7 +115,10 @@ class TvPauser:
             def connection_closed(self):
                 lost.set()
 
-        atv.listener = Listener()
+        # pyatv holds listeners by weak reference only, so keep ours alive here
+        # (an inline Listener() was collected at once: no reconnects, no updates).
+        self._listener = Listener()
+        atv.listener = self._listener
         pauser = self
 
         class Push:   # live play-state updates, to time a switch to Playing
@@ -121,7 +128,8 @@ class TvPauser:
             def playstatus_error(self, updater, exception):
                 pass
 
-        atv.push_updater.listener = Push()
+        self._push = Push()
+        atv.push_updater.listener = self._push
         atv.push_updater.start()
         self._atv = atv
         self._connected.set()
