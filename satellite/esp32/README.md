@@ -75,7 +75,7 @@ If the monitor shows `can't reach Taco at 192.168.4.239:10700; retrying`, nothin
 - Every `LEVELS_EVERY_S` (in `main.c`; 0 turns it off), the board reports each channel's rms and peak dBFS. taco-voice logs it as `channel levels (rms/peak dBFS) …`.
 - The audio isn't encrypted. The token and the `allow` list are the only protection, so keep port 10700 on the LAN.
 - Possible next steps on this board:
-  - playing replies on its speaker (the ES7210 has a speaker loopback channel that echo cancellation could use)
+  - playing replies on its speaker (the ES7210 has a speaker loopback channel that the front end's echo cancellation could use)
 
   These are planned in `PLAN.md` under "Future features".
 
@@ -104,6 +104,7 @@ taco-voice writes short text lines down the satellite's connection, and the boar
 | `STATE <listening\|thinking\|speaking> elsewhere` | a turn in another room |
 | `MUTE on` / `MUTE off` | the kiosk's "stop listening", house-wide. While muted, the board sends silence, so its audio never leaves the room |
 | `UPDATE` | new firmware is waiting; check now |
+| `AFE on` / `AFE off` | switch the speech front end (below); the board saves it and restarts |
 
 On each connection Taco sends the current `MUTE` and `STATE`, so a board that restarts mid-turn catches up. The monitor logs them (`taco is listening (here)`, `mic muted`).
 
@@ -121,3 +122,17 @@ The ring lights only for a conversation that started in this room:
 **K2**, the middle key, mutes and unmutes this room's mic. The mute is kept on the board, so it lasts through a reboot or a Pi outage. While muted, the board sends silence. It tells taco-voice with a short `TACO-EVENT <name> <token> MUTE on|off` connection, and the log shows `mute button on (mic muted)`. The kiosk's "stop listening" mutes everything, this mic included, and also turns the ring dim red.
 
 Pins, from Waveshare's demo code: the 7 WS2812 LEDs are on GPIO38 in RGB order. The keys are on the TCA9555 I/O expander (I²C 0x20, on the mic bus): K1 = P9, K2 = P10, K3 = P11, pressed = low. P8 enables the speaker amp. The brightness cap is `RING_MAX` in `main.c`.
+
+## Speech front end (ESP-SR AFE)
+The board can run Espressif's speech front end on its two mics. It uses source separation (BSS), with echo cancellation, noise suppression, VAD, WakeNet and AGC off. BSS splits the room's sound into two channels, each holding mostly one source: typically the TV on one, a person talking on the other. The board streams both, interleaved. taco-voice runs the wake word on each, as `living room` and `living room 2`, and takes the request from whichever one fired.
+
+It's off by default and switched from the Mac:
+```sh
+deploy/satellite-afe.sh on       # or off, or status
+```
+This writes `/srv/taco/satellite/living_room.afe` on the Pi. taco-voice sends `AFE on`, and the board keeps the setting in NVS and restarts (never while a new image is still on trial). Its handshake then says `afe=on ch=2`, the log shows `connected from … (speech front end on, 2 ch)`, and clips record `"afe": "on"`. If the AFE can't start, the board says `afe=failed`, streams the plain mic mix, and isn't asked again.
+
+Build notes:
+- The AFE needs PSRAM (the module is an ESP32-S3R8: 8 MB octal), enabled in `sdkconfig.defaults`.
+- ESP-SR's ESP32-S3 libraries are prebuilt against **newlib**. With IDF 6's default picolibc, an image linking them crashed at boot and rolled back, so `CONFIG_LIBC_NEWLIB=y`. After changing the libc, run `pio run -t clean`; otherwise the link fails on a TLS `errno` mismatch.
+- `AFE_RAW_INTERLEAVED` in `main.c` sets how the AFE's multi-channel output is laid out. It's undocumented. Interleaved was checked on the board (the two channels are distinct, and real speech transcribes).
