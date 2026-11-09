@@ -32,7 +32,11 @@ DEFAULTS: dict = {
         #   token = "..."               # shared secret; keep it out of the repo
         #   allow = ["192.168.4.0/24"]  # peers allowed to connect
         #   firmware = "..."            # OTA image; default /srv/taco/satellite/<name>.bin
+        #   volume = 70                 # its speaker, 0-100 (boards with spk=1)
         "satellites": [],
+        # Replies to a turn taken on a satellite play on its own speaker, when
+        # the board has one (spk=1 in its handshake); otherwise in the kitchen.
+        "satellite_replies": True,
     },
     "wake": {
         # Built-in name, or a path to a custom model such as

@@ -374,3 +374,123 @@ def test_request_mix_adds_both_channels():
         sock.sendall(both.tobytes())
         mixed = SatelliteMix(mic).read(timeout=2)
         assert mixed.dtype == np.int16 and int(mixed[0]) == 30100
+
+
+# -- replies on the satellite's own speaker --------------------------------------
+
+def test_handshake_reports_a_speaker():
+    mic = start_mic()
+    with connect_with(mic, "afe=off ch=1 spk=1") as sock:
+        sock.sendall(FRAME.tobytes())
+        mic.read(timeout=2)
+        assert mic.speaker
+    with connect_with(mic, "afe=off ch=1") as sock:   # older firmware
+        sock.sendall(FRAME.tobytes())
+        wait_for(lambda: not mic.speaker)
+
+
+def test_audio_is_framed_in_order_with_control_lines():
+    mic = start_mic()
+    with connect_with(mic, "afe=off ch=1 spk=1") as sock:
+        sock.sendall(FRAME.tobytes())
+        mic.read(timeout=2)
+        mic.send_line("STATE speaking here")
+        assert mic.send_audio(b"\x01\x02\x03\x04")
+        mic.send_line("STOP")
+        sock.settimeout(2)
+        got = b""
+        while not got.endswith(b"STOP\n"):
+            got += sock.recv(4096)
+        assert got == b"STATE speaking here\nAUDIO 4\n\x01\x02\x03\x04STOP\n"
+
+
+def test_resample_to_16k():
+    from taco.voice.audio import resample
+    tone = (np.sin(np.arange(22050) * 2 * np.pi * 440 / 22050) * 10000).astype(np.int16)
+    out = resample(tone, 22050)
+    assert out.dtype == np.int16 and len(out) == 16000
+    assert abs(int(np.abs(out).max()) - 10000) < 200
+
+
+class FakeSatForSpeaker:
+    name = "living room"
+
+    def __init__(self):
+        self.audio, self.lines, self.t0 = [], [], time.monotonic()
+
+    def send_audio(self, pcm):
+        self.audio.append((time.monotonic() - self.t0, len(pcm)))
+        return True
+
+    def send_line(self, line):
+        self.lines.append(line)
+
+
+def test_satellite_speaker_paces_audio_and_waits_for_it():
+    from taco.voice.audio import SatelliteSpeaker
+    sat = FakeSatForSpeaker()
+    spk = SatelliteSpeaker(sat)
+    spk.play(np.zeros(16000, dtype=np.int16), 16000)   # 1 s
+    t = time.monotonic()
+    spk.wait()
+    waited = time.monotonic() - t
+    assert sum(n for _, n in sat.audio) == 32000
+    assert 0.9 < waited < 1.6                     # played out, plus the board's latency
+    assert sat.audio[-1][0] > 0.4                 # paced, not all sent at once
+
+
+def test_satellite_speaker_stop_tells_the_board():
+    from taco.voice.audio import SatelliteSpeaker
+    sat = FakeSatForSpeaker()
+    spk = SatelliteSpeaker(sat)
+    spk.play(np.zeros(16000 * 3, dtype=np.int16), 16000)
+    time.sleep(0.2)
+    spk.stop()
+    t = time.monotonic()
+    spk.wait()
+    assert sat.lines == ["STOP"] and time.monotonic() - t < 0.5
+    assert sum(n for _, n in sat.audio) < 32000 * 3
+
+
+def _loop_for_replies(sat_speaker: bool, satellite_turn: bool):
+    from taco.voice.main import VoiceLoop
+    loop = VoiceLoop.__new__(VoiceLoop)
+    loop.cfg = {"audio": {"satellite_replies": True}, "listen": {"satellite_lag_s": 0.0}}
+    sat = NetworkMicrophone("living room", 0, "s3cret", host="127.0.0.1")
+    sat.speaker = sat_speaker
+    loop.speaker = object()
+    loop._sat_speakers = {sat: object()}
+    kitchen = object()
+    loop.active = (sat.second if satellite_turn else kitchen, None)
+    return loop, sat
+
+
+def test_replies_go_to_the_satellite_for_its_turns():
+    loop, sat = _loop_for_replies(sat_speaker=True, satellite_turn=True)
+    assert loop._reply_speaker() is loop._sat_speakers[sat]   # even from its second channel
+
+
+def test_replies_stay_in_the_kitchen_otherwise():
+    loop, sat = _loop_for_replies(sat_speaker=True, satellite_turn=False)
+    assert loop._reply_speaker() is loop.speaker
+    loop, sat = _loop_for_replies(sat_speaker=False, satellite_turn=True)   # old firmware
+    assert loop._reply_speaker() is loop.speaker
+
+
+class RecordingSpeaker:
+    def __init__(self):
+        self.played = []
+
+    def play(self, audio, rate):
+        self.played.append(rate)
+
+    def wait(self):
+        pass
+
+
+def test_wake_chime_plays_in_both_rooms_for_a_satellite_turn():
+    loop, sat = _loop_for_replies(sat_speaker=True, satellite_turn=True)
+    loop.speaker, loop.reply = RecordingSpeaker(), RecordingSpeaker()
+    loop.flush_mics = lambda: None
+    loop._play_and_wait(np.zeros(100, dtype=np.int16), 22050)
+    assert loop.speaker.played == [22050] and loop.reply.played == [22050]

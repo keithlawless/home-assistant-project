@@ -218,6 +218,7 @@ class NetworkMicrophone(_FrameSource):
         # What the live connection's handshake said: front end on, channels.
         self.afe: str | None = None
         self.channels = 1
+        self.speaker = False   # the board can play replies (spk=1)
         self.second = SatelliteChannel(self, ready)
         # Holds "on" or "off" to switch the speech front end (deploy/satellite-afe.sh).
         self.afe_file = Path(afe_file) if afe_file else None
@@ -252,16 +253,29 @@ class NetworkMicrophone(_FrameSource):
         except queue.Full:
             pass
 
+    def send_audio(self, pcm: bytes) -> bool:
+        """Queue reply audio (16 kHz mono s16) for the board's speaker, as
+        `AUDIO <n>` plus the bytes, in order with the control lines. Waits
+        briefly rather than drop audio when the queue is full."""
+        if self._conn is None:
+            return False
+        try:
+            self._out.put(b"AUDIO %d\n" % len(pcm) + pcm, timeout=1.0)
+            return True
+        except queue.Full:
+            return False
+
     def _send_lines(self) -> None:
         while True:
-            line = self._out.get()
+            item = self._out.get()
             conn = self._conn
             if conn is None:
                 continue
             try:
-                conn.sendall(f"{line}\n".encode())
+                conn.sendall(item if isinstance(item, bytes) else f"{item}\n".encode())
             except OSError as e:
-                log.info("satellite %r: control line %r not sent: %s", self.name, line, e)
+                what = "audio" if isinstance(item, bytes) else repr(item)
+                log.info("satellite %r: %s not sent: %s", self.name, what, e)
 
     def _firmware_mtime(self) -> float | None:
         try:
@@ -382,6 +396,7 @@ class NetworkMicrophone(_FrameSource):
                 self.second.last_frame = self.last_frame
                 old, self._conn = self._conn, conn
                 self.afe, self.channels = opts.get("afe"), channels
+                self.speaker = opts.get("spk") == "1"
             if old:
                 _close(old)
             log.info("satellite %r: connected from %s%s", self.name, ip,
@@ -424,6 +439,74 @@ def _close(conn: socket.socket) -> None:
     except OSError:
         pass
     conn.close()
+
+
+def resample(audio: np.ndarray, rate: int, to: int = 16000) -> np.ndarray:
+    """Linear resampling of int16 mono audio; plenty for speech and chimes."""
+    if rate == to or len(audio) == 0:
+        return audio.astype(np.int16)
+    n = int(round(len(audio) * to / rate))
+    t = np.arange(n) * (rate / to)
+    return np.interp(t, np.arange(len(audio)), audio.astype(np.float32)).astype(np.int16)
+
+
+class SatelliteSpeaker:
+    """Plays clips on a satellite's own speaker, with the same play / wait /
+    stop as Speaker. Audio goes down the satellite's connection in 100 ms
+    chunks, paced in real time a little ahead (LEAD_S), so the board's buffer
+    never overflows and stop() leaves little to drop. wait() returns once the
+    board should have played everything."""
+
+    CHUNK_S = 0.1
+    LEAD_S = 0.4
+    BOARD_LATENCY_S = 0.15   # its buffer and DMA, after the last chunk is sent
+
+    def __init__(self, sat: "NetworkMicrophone"):
+        self.sat = sat
+        self._clips: queue.Queue[tuple[np.ndarray, int]] = queue.Queue()
+        self._idle = threading.Event()
+        self._idle.set()
+        self._stopping = threading.Event()
+        self._end = 0.0   # monotonic time the board will have played everything sent
+        threading.Thread(target=self._run, daemon=True, name=f"spk-{sat.name}").start()
+
+    def play(self, audio: np.ndarray, sample_rate: int) -> None:
+        self._idle.clear()
+        self._clips.put((audio, sample_rate))
+
+    def wait(self) -> None:
+        self._clips.join()
+        self._idle.wait()
+        time.sleep(max(0.0, self._end + self.BOARD_LATENCY_S - time.monotonic()))
+
+    def stop(self) -> None:
+        if self._idle.is_set() and time.monotonic() >= self._end:
+            return
+        self._stopping.set()
+        self.sat.send_line("STOP")
+        self._end = 0.0
+
+    def _run(self) -> None:
+        chunk = int(16000 * self.CHUNK_S)
+        while True:
+            audio, rate = self._clips.get()
+            try:
+                pcm = resample(audio, rate)
+                for i in range(0, len(pcm), chunk):
+                    if self._stopping.is_set():
+                        break
+                    ahead = self._end - time.monotonic()
+                    if ahead > self.LEAD_S:
+                        time.sleep(ahead - self.LEAD_S)   # keep only LEAD_S queued on the board
+                    piece = pcm[i:i + chunk]
+                    if not self.sat.send_audio(piece.tobytes()):
+                        break   # disconnected: nothing to wait for
+                    self._end = max(time.monotonic(), self._end) + len(piece) / 16000
+            finally:
+                self._clips.task_done()
+                if self._clips.empty():
+                    self._stopping.clear()
+                    self._idle.set()
 
 
 class Speaker:
