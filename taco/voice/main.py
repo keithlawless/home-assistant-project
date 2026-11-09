@@ -138,6 +138,11 @@ def _clip_tags(mic) -> dict:
     return {"afe": sat.afe} if isinstance(sat, NetworkMicrophone) and sat.afe else {}
 
 
+def _afe_on(mic) -> bool:
+    sat = mic.parent if isinstance(mic, SatelliteChannel) else mic
+    return getattr(sat, "afe", None) == "on"
+
+
 def _room(mic) -> str:
     """The room a mic is in: a satellite's second channel shares its room's tuning."""
     return mic.parent.name if isinstance(mic, SatelliteChannel) else mic.name
@@ -366,7 +371,9 @@ class VoiceLoop:
         """A satellite also hears speech in the kitchen, and shouldn't take
         the turn: hold its wake when the local mic heard that moment much
         louder ([wake] local_priority_db), to see if the local mic wakes too."""
-        limit = self.cfg["wake"]["local_priority_db"]
+        w = self.cfg["wake"]
+        afe = _afe_on(mic)
+        limit = w["afe_local_priority_db" if afe else "local_priority_db"]
         if mic is self.listeners[0][0] or not limit:
             return False
         margin = self._local_margin(wake)
@@ -382,7 +389,8 @@ class VoiceLoop:
         log.info("wake word (%.2f, %s) waits: %s heard it %.0f dB louder",
                  score, mic.name, self.listeners[0][0].name, margin)
         self._deferred = {"score": score, "listener": (mic, wake), "margin": margin,
-                          "until": now + self.cfg["wake"]["local_defer_s"]}
+                          "until": now + w["local_defer_s"],
+                          "listen_db": w["afe_local_listen_db" if afe else "local_listen_db"]}
         return True
 
     def _drop_deferred(self) -> None:
@@ -408,7 +416,7 @@ class VoiceLoop:
         mic when it heard the speaker far louder ([wake] local_listen_db)."""
         d, self._deferred = self._deferred, None
         listener = d["listener"]
-        if d["margin"] >= self.cfg["wake"]["local_listen_db"]:
+        if d["margin"] >= d["listen_db"]:
             listener = self.listeners[0]
         return d["score"], d["listener"], listener
 
