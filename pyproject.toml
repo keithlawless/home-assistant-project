@@ -21,6 +21,8 @@ dependencies = [
   "piper-tts>=1.3",
   "kokoro-onnx>=0.4",
   "mutagen>=1.47",
+  "pyatv>=0.16",       # pause the living-room Apple TV during turns (taco/voice/tv.py)
+  "srptools<2",        # 2.0 broke pyatv's pairing (keyword-only argument)
   "tflite-runtime; sys_platform == 'linux'",  # stub, see [tool.uv.sources]
 ]
 

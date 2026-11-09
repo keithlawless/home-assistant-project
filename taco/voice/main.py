@@ -28,6 +28,7 @@ from taco.voices import DEFAULT_VOICE, PREVIEW_TEXT
 
 from .alarm import AlarmPlayer
 from .clips import ClipRecorder
+from .tv import TvPauser
 from .audio import Microphone, NetworkMicrophone, SatelliteChannel, Speaker, tone
 from .core_link import CoreLink
 from .hermes import HermesClient, asks_question
@@ -185,6 +186,8 @@ class VoiceLoop:
         self.announcer = Speaker(audio["output_device"])   # alerts, scheduled messages
         self.alarm = AlarmPlayer(Speaker(audio["output_device"]), self.synthesize)
         self.core = CoreLink(cfg["core"]["url"], self._on_core_message)
+        tv = cfg["tv"]
+        self.tv = TvPauser(tv["apple_tv"], tv["rooms"], tv["marker"], tv["resume_within_s"]) if tv["apple_tv"] else None
 
     def _wake_for(self, room: str, mic_name: str | None = None) -> WakeWord:
         w = self.cfg["wake"]
@@ -283,6 +286,8 @@ class VoiceLoop:
             except OSError:
                 log.exception("mic %r failed to start", mic.name)
         threading.Thread(target=self._watch_mics, daemon=True, name="mic-watch").start()
+        if self.tv:
+            self.tv.start()
         self._render_ack()   # also warms up the TTS graph
         log.info("listening for wake word on %s (barge-in %s)",
                  ", ".join(mic.name for mic, _ in self.listeners),
@@ -317,7 +322,13 @@ class VoiceLoop:
                 # Like a smart speaker: saying the name silences the alarm.
                 self.alarm.silence()
                 self.core.stop_ringing()
-            self.converse()
+            if self.tv:
+                self.tv.turn_started(_room(self.active[0]))   # where the request is heard
+            try:
+                self.converse()
+            finally:
+                if self.tv:
+                    self.tv.turn_ended()
             self._wake_clip = None
             self._reset_wake()
             self.flush_mics()
