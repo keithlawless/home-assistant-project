@@ -235,3 +235,24 @@ def test_media_and_recipe():
 def test_speakers(text, name, slots):
     intent = p(text)
     assert (intent.name, intent.slots) == (name, slots)
+
+
+@pytest.mark.parametrize("text, slots", [
+    ("Play Miles Davis on Spotify", {"query": "miles davis"}),
+    ("play Kind of Blue by Miles Davis on Spotify", {"query": "kind of blue", "by": "miles davis"}),
+    ("Play the album Kind of Blue on Spotify", {"query": "kind of blue", "kind": "album"}),
+    ("play songs by Radiohead on Spotify on the Sonos", {"query": "radiohead", "kind": "artist", "speaker": "sonos"}),
+    ("Play my Discover Weekly", {"query": "discover weekly", "playlist": True}),
+    ("Play my dinner party playlist", {"query": "dinner party", "playlist": True}),
+    ("play my liked songs", {"query": "", "kind": "liked"}),
+])
+def test_spotify_intents(text, slots):
+    i = p(text)
+    assert i.name == "spotify_play" and i.slots == slots
+
+
+def test_resume_music_but_not_timers():
+    assert p("Resume the music").name == "media_resume"
+    assert p("unpause it").name == "media_resume"
+    assert p("resume the timer").name == "resume_timer"
+    assert p("play Miles Davis").name == "media_play"   # no "Spotify": the NAS, then Spotify, then radio

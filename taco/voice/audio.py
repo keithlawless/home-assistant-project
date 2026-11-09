@@ -545,6 +545,10 @@ class Speaker:
                 if not self._stopping.is_set():
                     self._proc = subprocess.Popen(
                         ["pw-play", "--raw", "--rate", str(rate), "--channels", "1", "--format", "s16",
+                         # WirePlumber would otherwise save and restore volumes per media
+                         # role, which every pw-play shares: music ducked to 0.2 became the
+                         # volume of Taco's voice (2026-11-09).
+                         "-P", "{ state.restore-props = false }",
                          *_target_args(self.device), "-"],
                         stdin=subprocess.PIPE, stderr=subprocess.DEVNULL,
                     )

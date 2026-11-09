@@ -441,6 +441,40 @@ def reindex_music() -> dict:
     return _call("POST", "/api/music/reindex")
 
 
+# --- Spotify -------------------------------------------------------------------
+
+@mcp.tool()
+def spotify_search(query: str, type: str = "artist,album,track,playlist") -> dict:
+    """Search Spotify (at most 10 results of each type) for artists, albums,
+    tracks or playlists. Use it for music the household's collection doesn't
+    have (try search_music first when an artist or album is named), and for
+    moods or occasions ("something chill for dinner": type="playlist"). Then
+    call spotify_play with a result's uri."""
+    return _call("GET", "/api/spotify/search", params={"q": query, "type": type})
+
+
+@mcp.tool()
+def spotify_my_playlists() -> list[dict]:
+    """The household's own Spotify playlists (name and uri), including
+    followed ones such as Discover Weekly. Use it for "play my ... playlist"."""
+    return _call("GET", "/api/spotify/playlists")
+
+
+@mcp.tool()
+def spotify_play(uri: str | None = None, query: str | None = None, name: str | None = None) -> dict:
+    """Play on Taco through Spotify: a `uri` from spotify_search or
+    spotify_my_playlists (with its `name`, for the screen), or the best
+    match for `query`. Plays wherever music is currently routed (e.g. the
+    Sonos; see play_on_speaker)."""
+    return _call("POST", "/api/spotify/play", json={"uri": uri, "query": query, "name": name})
+
+
+@mcp.tool()
+def spotify_control(action: str) -> dict:
+    """Control Spotify playing on Taco: "pause", "resume", "next" or "previous"."""
+    return _call("POST", "/api/spotify/control", json={"action": action})
+
+
 # --- speakers ------------------------------------------------------------------
 
 @mcp.tool()

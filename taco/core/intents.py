@@ -324,7 +324,7 @@ def parse(raw: str, now: datetime | None = None) -> Intent | None:
 
     # Lists keep commas so "milk, eggs and bread" splits into three items.
     return (_list_intent(normalize(raw, keep_commas=True).rstrip(",")) or _household_intent(text)
-            or _speaker_intent(text) or _media_intent(text) or _recipe_intent(text)
+            or _spotify_intent(text) or _speaker_intent(text) or _media_intent(text) or _recipe_intent(text)
             or _device_intent(text))
 
 
@@ -377,10 +377,48 @@ def _album_pick(q: str) -> dict[str, Any] | None:
     return None
 
 
+_SPEAKER_TAIL = r"(?: (?:on|through|over) (?:the |my )?(?P<s>[a-z0-9 ]+?)(?: speaker)?)?"
+_MY_LISTS = r"discover weekly|release radar|daily mix \d+|on repeat|repeat rewind|time capsule"
+_LIKED = r"(?:liked|favou?rite|saved) (?:songs|tracks|music)|likes|favou?rites"
+
+
+def _spotify_slots(q: str) -> dict[str, Any]:
+    """What to find on Spotify, from the words between "play" and "on Spotify"."""
+    if re.fullmatch(rf"(?:my )?(?:{_LIKED})", q):
+        return {"query": "", "kind": "liked"}
+    if m := (re.fullmatch(r"(?:my |the )?(?P<n>.+?) playlist", q) or re.fullmatch(r"(?:my |the )?playlist (?P<n>.+)", q)
+             or re.fullmatch(rf"my (?P<n>{_MY_LISTS})", q)):
+        return {"query": m.group("n"), "playlist": True}
+    if picked := _album_pick(q):   # "miles davis s latest album": Spotify search can't sort by date
+        return {"query": f"{picked['by']}", "kind": "artist"}
+    if m := re.fullmatch(r"(?:the )?album (?P<q>.+?)(?: by (?P<by>.+))?", q):
+        return {"query": m.group("q"), "kind": "album", **({"by": m.group("by")} if m.group("by") else {})}
+    if m := re.fullmatch(r"(?:songs|music|something|anything|stuff) (?:by|from) (?P<q>.+)", q):
+        return {"query": m.group("q"), "kind": "artist"}
+    if m := re.fullmatch(r"(?P<q>.+?) by (?P<by>.+)", q):
+        return {"query": m.group("q"), "by": m.group("by")}
+    return {"query": q}
+
+
+def _spotify_intent(text: str) -> Intent | None:
+    """ "Play X on Spotify", and the user's own Spotify playlists."""
+    if m := re.fullmatch(rf"(?:play|put on) (?:some )?(?P<q>.+?) (?:on|from) spotify{_SPEAKER_TAIL}", text):
+        slots = _spotify_slots(m.group("q"))
+        return Intent("spotify_play", {**slots, **({"speaker": m.group("s")} if m.group("s") else {})})
+    if m := re.fullmatch(rf"(?:play|put on) (?P<q>my (?:{_MY_LISTS}|{_LIKED})|(?:my |the )?.+? playlist){_SPEAKER_TAIL}", text):
+        slots = _spotify_slots(m.group("q"))
+        if slots.get("playlist") or slots.get("kind") == "liked":
+            return Intent("spotify_play", {**slots, **({"speaker": m.group("s")} if m.group("s") else {})})
+    return None
+
+
 def _media_intent(text: str) -> Intent | None:
     """Internet radio and the music library."""
     if re.fullmatch(r"(?:stop|turn off|pause|kill|end) (?:the |this )?(?:music|radio|station|song)", text):
         return Intent("media_stop")
+    if re.fullmatch(r"(?:resume|unpause|continue|restart)(?: playing)? (?:the |my )?(?:music|song|spotify|playback)"
+                    r"|(?:resume|unpause) (?:it|playing)", text):
+        return Intent("media_resume")
     if re.fullmatch(r"what s (?:playing|this|this song|this station|on)|what (?:station|song) is (?:this|playing)"
                     r"|who (?:is|s) (?:this|singing|playing)|what song is this", text):
         return Intent("media_status")

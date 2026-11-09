@@ -21,7 +21,9 @@ from .calendar import say_events
 from .devices.match import resolve
 from .lists import canonical, split_items
 from .media import run, search_stations
+from .oauth import OAuthError
 from .speakers import KITCHEN, Speaker, resolve as resolve_speaker
+from .spotify import SpotifyError
 from .intents import Intent, normalize, parse, say_clock, say_duration
 from .timers import Timer
 
@@ -396,6 +398,25 @@ class Assistant:
             """Move to the requested speaker, only once there's something to play."""
             return chosen is None or await self.state.speakers.select(chosen)
 
+        if not query and not by and not radio:
+            # "Play music (on the Sonos)": keep what's playing, or resume what
+            # played last; never swap Spotify for the last radio or NAS request.
+            if self.state.music_playing:
+                if chosen is None:
+                    return _reply("It's already playing.")
+                if not await switch():
+                    return _reply(self._unreachable(chosen))
+                return _reply(f"Moved the music to {chosen.name}." if where else "Moved the music back here.")
+            if self.state.last_source == "spotify" and self.state.spotify.track and self.state.spotify_api:
+                if not await switch():
+                    return _reply(self._unreachable(chosen))
+                try:
+                    await self.state.resume_music()
+                except (SpotifyError, httpx.HTTPError, OAuthError) as e:
+                    log.warning("spotify resume failed: %s", e)
+                    return _reply("Sorry, I couldn't resume Spotify.")
+                return _reply(f"Resuming Spotify{where}.")
+
         library = self.state.library
         if (pick or year) and not library.ready:
             return {"handled": False}
@@ -413,8 +434,19 @@ class Assistant:
             # ("the album before Noise Floor"): Hermes can, with search_music.
             if pick or year or await asyncio.to_thread(library.mentions_artist, f"{query} {by or ''}"):
                 return {"handled": False}
-            if kind == "album":
+            if kind == "album" and not self.state.spotify_api:
                 return _reply(f"I couldn't find an album called {query} in your music.")
+            if kind == "artist" and not self.state.spotify_api:
+                return _reply(f"I couldn't find any music by {query}.")
+        # Not in the library: Spotify next, then radio ("... radio" skips it).
+        if (query or by) and not radio and self.state.spotify_api:
+            thing = await self._spotify_resolve(query, by, kind)
+            if thing:
+                if not await switch():
+                    return _reply(self._unreachable(chosen))
+                return await self._play_spotify(thing, where)
+            if kind == "album":
+                return _reply(f"I couldn't find an album called {query}.")
             if kind == "artist":
                 return _reply(f"I couldn't find any music by {query}.")
         if by:
@@ -435,12 +467,71 @@ class Assistant:
             return _reply("Sorry, I couldn't reach the radio station directory.")
         return _reply(f"Playing {station['name']}{where}.")
 
+    # -- Spotify ----------------------------------------------------------------------
+
+    async def _spotify_resolve(self, query: str, by: str | None = None, kind: str | None = None,
+                               playlist: bool = False):
+        try:
+            return await self.state.spotify_api.resolve(query, by, kind, playlist)
+        except (SpotifyError, httpx.HTTPError, OAuthError) as e:
+            log.warning("spotify search failed: %s", e)
+            return None
+
+    async def _play_spotify(self, thing, where: str = "") -> dict[str, Any]:
+        try:
+            await self.state.play_spotify(thing)
+        except SpotifyError as e:
+            return _reply(f"Spotify couldn't play that: {e}.")
+        except (httpx.HTTPError, OAuthError) as e:
+            log.warning("spotify play failed: %s", e)
+            return _reply("Sorry, I couldn't reach Spotify.")
+        return _reply(f"Playing {thing.name}{where} on Spotify.")
+
+    async def _do_spotify_play(self, query: str = "", by: str | None = None, kind: str | None = None,
+                               playlist: bool = False, speaker: str | None = None) -> dict[str, Any]:
+        """ "... on Spotify", or one of the user's playlists. Never radio."""
+        if not self.state.spotify_api:
+            if playlist or kind in ("liked", "playlist"):
+                return {"handled": False}
+            return _reply("Spotify isn't set up yet.")
+        chosen = resolve_speaker(speaker, await self.state.speakers.list()) if speaker else None
+        if speaker and chosen is None:
+            return _reply(f"I don't know a speaker called {speaker}.")
+        thing = await self._spotify_resolve(query, by, kind, playlist)
+        if thing is None:
+            what = f"a playlist called {query}" if playlist else (query or "that")
+            return _reply(f"I couldn't find {what} on Spotify.")
+        if chosen and not await self.state.speakers.select(chosen):
+            return _reply(self._unreachable(chosen))
+        where = f" on {chosen.name}" if chosen and not chosen.is_kitchen else ""
+        return await self._play_spotify(thing, where)
+
+    async def _do_media_resume(self) -> dict[str, Any]:
+        try:
+            if await self.state.resume_music():
+                return _reply(silent=True)
+        except (SpotifyError, httpx.HTTPError, OAuthError) as e:
+            log.warning("spotify resume failed: %s", e)
+            return _reply("Sorry, I couldn't resume Spotify.")
+        if self.state.music_playing:
+            return _reply("It's already playing.")
+        return _reply("There's nothing to resume.")
+
     async def _do_media_stop(self) -> dict[str, Any]:
         await self.state.stop_music()
         return _reply(silent=True)
 
     async def _do_media_status(self) -> dict[str, Any]:
         st = self.state.media_status()
+        if st and st.get("source") == "spotify" and self.state.spotify_api:
+            try:
+                song = await self.state.spotify_api.now_playing()
+            except (SpotifyError, httpx.HTTPError, OAuthError):
+                song = None
+            if song and song.get("title"):
+                who = f" by {song['artist']}" if song.get("artist") else ""
+                album = f", from {song['album']}" if song.get("album") else ""
+                return _reply(f"This is {song['title']}{who}{album}.")
         if st and (self.state.media.station or {}).get("library"):
             song = await self.state.media.now_playing()
             if song.get("title"):
@@ -451,6 +542,13 @@ class Assistant:
     async def _do_media_skip(self, step: int) -> dict[str, Any]:
         if await self.state.media.skip(step):
             return _reply(silent=True)
+        if self.state.spotify.playing and self.state.spotify_api:
+            try:
+                await self.state.spotify_api.skip(step)
+                return _reply(silent=True)
+            except (SpotifyError, httpx.HTTPError, OAuthError) as e:
+                log.warning("spotify skip failed: %s", e)
+                return _reply("Sorry, Spotify didn't skip.")
         if self.state.music_playing:
             return _reply("I can only skip songs from your music collection.")
         return _reply("Nothing's playing right now.")

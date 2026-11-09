@@ -182,21 +182,18 @@ A common `TTSEngine` interface streams sentence by sentence, so speech starts be
 
 ## Future features (deferred)
 
-- **Spotify voice control** (requested 2026-10-09). Today Taco is only a
-  passive Spotify Connect speaker ("Taco" in the Spotify app). Add playback
-  on request through the Spotify Web API: "play Miles Davis on Spotify",
-  "play my Discover Weekly", pause / resume / skip / back, "what's playing?"
-  for anything on the account, and track and album details on the
-  Now Playing chip.
-  - Needs from the household: a Spotify developer app (Client ID and Secret,
-    stored in `/srv/taco/config.toml`, never the repo), a one-time browser
-    login to authorize playback control, and Premium.
-  - Build: OAuth token store with refresh in taco-core; search and play on
-    the librespot device ("Taco") by device id; fast-path intents for
-    "play X on Spotify" and the transport controls; MCP tools so Hermes
-    handles vaguer asks ("something chill for dinner").
-  - Caveat: Spotify's development-mode limits allow only a few accounts
-    to use the app, which is fine for one household.
+- **Spotify voice control: built** (2026-11-09; see the README for setup).
+  `taco/core/spotify.py` plays context URIs (artist, album, playlist, liked
+  songs) on librespot's "Taco" device through the Web API. Search, playback
+  and the user's playlists are all supported. A plain "play X" goes to the NAS,
+  then Spotify, then radio. Pause keeps the session, so "resume the music"
+  works. Hermes gets `spotify_search`, `spotify_play`, `spotify_my_playlists`
+  and `spotify_control`.
+  - Built for 2026 Development Mode rules: search returns at most 10
+    results; artist top tracks and recommendations are gone; and playlist
+    contents are readable only for the user's own playlists. So Taco never
+    reads contents, and "X's latest album" plays the artist instead.
+  - To confirm once set up: Discover Weekly and liked songs by context URI.
 - **Telegram remote control** (deferred 2026-10-09). Text Taco from a phone
   through the Hermes Telegram gateway; needs a bot token from @BotFather.
 - **Living-room satellite extras: done** (built 2026-11-05 to 11-09, all five

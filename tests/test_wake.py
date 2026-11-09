@@ -182,7 +182,8 @@ def _loop_with(local_level, satellite_level, limit=10.0, kitchen_scores=(0.0,)):
 
     loop = VoiceLoop.__new__(VoiceLoop)   # no models or devices
     loop.cfg = {"wake": {"local_priority_db": limit, "local_defer_s": 0.8, "local_listen_db": 15.0,
-                        "afe_local_priority_db": 36.0, "afe_local_listen_db": 42.0}}
+                        "afe_local_priority_db": 36.0, "afe_local_listen_db": 42.0,
+                        "afe_faint_db": -48.0}}
     loop.clips = None
     loop.muted = False
     loop._deferred = None
@@ -272,7 +273,8 @@ def test_satellite_channels_waiting_together_keep_the_stronger(caplog):
 
     loop = VoiceLoop.__new__(VoiceLoop)
     loop.cfg = {"wake": {"local_priority_db": 10.0, "local_defer_s": 0.8, "local_listen_db": 15.0,
-                        "afe_local_priority_db": 36.0, "afe_local_listen_db": 42.0}}
+                        "afe_local_priority_db": 36.0, "afe_local_listen_db": 42.0,
+                        "afe_faint_db": -48.0}}
     loop.clips = None
     loop.muted = False
     loop._deferred = None
@@ -307,5 +309,22 @@ def test_front_end_satellite_still_defers_far_louder_kitchen_speech():
 
 def test_front_end_satellite_fires_at_once_for_loud_couch_speech():
     loop, mic, satellite = _loop_with(10500, 300)  # ~31 dB, the loudest couch reading
+    satellite.afe = "on"
+    assert loop._detect_wake(now=0.0)[2][0] is satellite
+
+
+def test_front_end_satellite_defers_kitchen_speech_it_heard_faintly():
+    """With music on, kitchen speech reached the satellite at a couch-like
+    margin (+31 dB) but faintly (-52 dBFS): it waits, and if the kitchen
+    doesn't wake, the request still comes from the kitchen mic."""
+    loop, mic, satellite = _loop_with(2900, 82)    # ~31 dB margin; satellite ~ -52 dBFS
+    satellite.afe = "on"
+    assert loop._detect_wake(now=0.0) is None      # waits for the kitchen
+    score, detector, listener = loop._detect_wake(now=1.0)
+    assert detector[0] is satellite and listener[0] is mic
+
+
+def test_front_end_couch_speech_is_not_faint():
+    loop, mic, satellite = _loop_with(2900, 600)   # ~14 dB margin; satellite ~ -35 dBFS
     satellite.afe = "on"
     assert loop._detect_wake(now=0.0)[2][0] is satellite

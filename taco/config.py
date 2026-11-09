@@ -72,6 +72,12 @@ DEFAULTS: dict = {
         # satellite at all (0 of 6 tries).
         "afe_local_priority_db": 36.0,
         "afe_local_listen_db": 42.0,
+        # ...and the satellite's own level: with music on, kitchen speech
+        # reached it at +31..+36 dB margin, overlapping the couch, but the
+        # satellite heard it only at -49..-55 dBFS, against -35..-45 from the
+        # couch (2026-11-09). Fainter than this, it waits for the kitchen and,
+        # if the kitchen doesn't wake, takes the request from the kitchen mic.
+        "afe_faint_db": -48.0,
         # Keep a short clip of every wake and near miss, for tuning and
         # retraining (taco/voice/clips.py). Near misses are runs that peak at
         # or above near_miss without firing. Oldest clips go past max_clips.
@@ -143,6 +149,16 @@ DEFAULTS: dict = {
         "reindex_days": 7,     # also indexed at every taco-core start, and on "reindex music"
         "workers": 6,
         "db": str(TACO_HOME / "data" / "music.db"),
+    },
+    "spotify": {
+        # Voice control of Spotify (taco/core/spotify.py). Empty = off. A
+        # Development Mode app at developer.spotify.com, with redirect URI
+        # http://127.0.0.1:8888/callback; deploy/spotify-auth.py gets the
+        # refresh token. Keep all three in /srv/taco/config.toml only.
+        "client_id": "",
+        "client_secret": "",
+        "refresh_token": "",
+        "device_name": "Taco",   # librespot's --name
     },
     "weather_station": {
         # Optional local station for live current conditions

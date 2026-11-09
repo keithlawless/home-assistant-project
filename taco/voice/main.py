@@ -389,7 +389,12 @@ class VoiceLoop:
         if mic is self.listeners[0][0] or not limit:
             return False
         margin = self._local_margin(wake)
-        if margin < limit:
+        # With the front end on, a wake the satellite heard only faintly came
+        # from another room, however the margin reads (the kitchen mic's own
+        # level swings with music and its auto gain).
+        level = wake.level_db()
+        faint = afe and level < w["afe_faint_db"]
+        if margin < limit and not faint:
             return False
         if self._deferred:
             # The satellite's other channel heard the same words and is
@@ -398,9 +403,10 @@ class VoiceLoop:
                 wake.reset()
                 return True
             self._deferred["listener"][1].reset()
-        log.info("wake word (%.2f, %s) waits: %s heard it %.0f dB louder",
-                 score, mic.name, self.listeners[0][0].name, margin)
-        self._deferred = {"score": score, "listener": (mic, wake), "margin": margin,
+        log.info("wake word (%.2f, %s) waits: %s heard it %.0f dB louder%s",
+                 score, mic.name, self.listeners[0][0].name, margin,
+                 f", and it was faint here ({level:.0f} dBFS)" if faint else "")
+        self._deferred = {"score": score, "listener": (mic, wake), "margin": margin, "faint": faint,
                           "until": now + w["local_defer_s"],
                           "listen_db": w["afe_local_listen_db" if afe else "local_listen_db"]}
         return True
@@ -428,7 +434,7 @@ class VoiceLoop:
         mic when it heard the speaker far louder ([wake] local_listen_db)."""
         d, self._deferred = self._deferred, None
         listener = d["listener"]
-        if d["margin"] >= d["listen_db"]:
+        if d["margin"] >= d["listen_db"] or d.get("faint"):
             listener = self.listeners[0]
         return d["score"], d["listener"], listener
 
