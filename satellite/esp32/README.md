@@ -74,10 +74,7 @@ If the monitor shows `can't reach Taco at 192.168.4.239:10700; retrying`, nothin
 ## Notes
 - Every `LEVELS_EVERY_S` (in `main.c`; 0 turns it off), the board reports each channel's rms and peak dBFS. taco-voice logs it as `channel levels (rms/peak dBFS) …`.
 - The audio isn't encrypted. The token and the `allow` list are the only protection, so keep port 10700 on the LAN.
-- Possible next steps on this board:
-  - playing replies on its speaker (the ES7210 has a speaker loopback channel that the front end's echo cancellation could use)
-
-  These are planned in `PLAN.md` under "Future features".
+- Possible next step on this board: barge-in from the living room, using the front end's echo cancellation with the ES7210's speaker-loopback channel (see `PLAN.md`, "Future features").
 
 ## Firmware updates over Wi-Fi
 After one USB flash with this layout (`partitions.csv`: two 4 MB app slots, plus 6 MB kept for speech models), new builds go over Wi-Fi:
@@ -105,6 +102,9 @@ taco-voice writes short text lines down the satellite's connection, and the boar
 | `MUTE on` / `MUTE off` | the kiosk's "stop listening", house-wide. While muted, the board sends silence, so its audio never leaves the room |
 | `UPDATE` | new firmware is waiting; check now |
 | `AFE on` / `AFE off` | switch the speech front end (below); the board saves it and restarts |
+| `AUDIO <n>` + n bytes | reply audio for the board's speaker: 16 kHz mono s16le, paced by Taco |
+| `STOP` | drop reply audio that hasn't played yet (the kiosk's stop button) |
+| `VOLUME <0-100>` | speaker volume, sent on connect from `[[audio.satellites]] volume` (default 70) |
 
 On each connection Taco sends the current `MUTE` and `STATE`, so a board that restarts mid-turn catches up. The monitor logs them (`taco is listening (here)`, `mic muted`).
 
@@ -136,3 +136,11 @@ Build notes:
 - The AFE needs PSRAM (the module is an ESP32-S3R8: 8 MB octal), enabled in `sdkconfig.defaults`.
 - ESP-SR's ESP32-S3 libraries are prebuilt against **newlib**. With IDF 6's default picolibc, an image linking them crashed at boot and rolled back, so `CONFIG_LIBC_NEWLIB=y`. After changing the libc, run `pio run -t clean`; otherwise the link fails on a TLS `errno` mismatch.
 - `AFE_RAW_INTERLEAVED` in `main.c` sets how the AFE's multi-channel output is laid out. It's undocumented. Interleaved was checked on the board (the two channels are distinct, and real speech transcribes).
+
+## Replies on the board's speaker
+A turn that Taco takes on this satellite gets its reply here, through the ES8311 DAC and the board's speaker, rather than in the kitchen. The wake chime plays in both rooms. Alarms, timers and announcements always stay in the kitchen. The handshake says `spk=1` when the speaker is up, and older firmware just keeps the replies in the kitchen. Turn it off with `[audio] satellite_replies = false`.
+
+- Pins (from Waveshare's demo and community firmware for this board): I2S DOUT is **GPIO16**, the ES8311 is at its default I²C address, and the amp is enabled by **TCA9555 P8, active high**. The ring task switches the amp on with the first audio and off after 300 ms of silence.
+- The speaker shares I2S0 with the mics (full duplex), so it's opened in exactly the mics' format (16 kHz, two 32-bit slots); each mono sample goes into both slots. A different format would reclock the mics.
+- taco-voice resamples replies to 16 kHz and sends 100 ms chunks, about 0.4 s ahead of playback, into a 4 s buffer in PSRAM. After a reply it waits `satellite_lag_s` before dropping Taco's own voice from the mics. There's no barge-in here yet: Taco ignores the living-room mic while it talks.
+- A new image is now confirmed only once the mics show real signal (about −84 dBFS on the first mic) as well as streaming for 10 s, so a firmware change that breaks the audio path rolls back.

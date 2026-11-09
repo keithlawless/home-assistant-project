@@ -29,7 +29,8 @@ from taco.voices import DEFAULT_VOICE, PREVIEW_TEXT
 from .alarm import AlarmPlayer
 from .clips import ClipRecorder
 from .tv import TvPauser
-from .audio import Microphone, NetworkMicrophone, SatelliteChannel, SatelliteMix, Speaker, tone
+from .audio import (Microphone, NetworkMicrophone, SatelliteChannel, SatelliteMix, SatelliteSpeaker, Speaker,
+                    tone)
 from .core_link import CoreLink
 from .hermes import HermesClient, asks_question
 from .listen import record_request
@@ -172,6 +173,12 @@ class VoiceLoop:
         self.active = self.listeners[0]   # the (mic, wake) handling the current turn
         self._deferred: dict | None = None   # a satellite wake waiting on the local mic
         self.speaker = Speaker(audio["output_device"])
+        # Each satellite's own speaker, for replies to turns taken there.
+        self._sat_speakers = {}
+        for sat, s in zip((m for m in mics if isinstance(m, NetworkMicrophone)), audio["satellites"]):
+            sat.volume = s.get("volume", 70)
+            self._sat_speakers[sat] = SatelliteSpeaker(sat)
+        self.reply = self.speaker   # where the current turn's replies play
         self.stt = Transcriber(cfg["stt"]["model"], cfg["stt"]["compute_type"],
                                build_vocabulary(None, cfg["stt"]["vocabulary"]))
         self.engines = EngineCache()
@@ -278,6 +285,8 @@ class VoiceLoop:
                 log.info("stop requested")
                 self.cancel.set()
                 self.speaker.stop()
+                if self.reply is not self.speaker:
+                    self.reply.stop()
                 self.hermes.abort()
             elif msg.get("command") == "preview" and msg.get("voice"):
                 threading.Thread(target=self._preview, args=(msg["voice"],), daemon=True).start()
@@ -361,6 +370,8 @@ class VoiceLoop:
         """A satellite (re)connected: tell it where things stand."""
         sat.send_line(f"MUTE {'on' if self.muted else 'off'}")
         sat.send_line(self._state_line(sat))
+        if getattr(sat, "volume", None) is not None:
+            sat.send_line(f"VOLUME {sat.volume}")
 
     def _local_margin(self, wake: WakeWord) -> float:
         """How much louder (dB) the local mic heard the last few seconds than
@@ -506,9 +517,33 @@ class VoiceLoop:
             return SatelliteMix(sat)
         return mic
 
+    def _reply_speaker(self):
+        """Where this turn's replies play: the satellite's own speaker for a
+        turn taken there (if the board has one), else the kitchen speaker."""
+        mic = self.active[0]
+        sat = mic.parent if isinstance(mic, SatelliteChannel) else mic
+        if (self.cfg["audio"]["satellite_replies"] and isinstance(sat, NetworkMicrophone)
+                and sat.speaker and sat in self._sat_speakers):
+            return self._sat_speakers[sat]
+        return self.speaker
+
+    def _flush_after_reply(self) -> None:
+        """Drop Taco's own voice from the mics. A satellite that played the
+        reply sends it back about satellite_lag_s late, so wait for that."""
+        if self.reply is not self.speaker:
+            time.sleep(self.cfg["listen"]["satellite_lag_s"])
+        self.flush_mics()
+
     def converse(self) -> None:
         """One wake: a request, plus follow-ups while Taco keeps asking questions
         or keeps being interrupted."""
+        self.reply = self._reply_speaker()
+        try:
+            self._converse()
+        finally:
+            self.reply = self.speaker
+
+    def _converse(self) -> None:
         start_timeout = self.cfg["listen"]["start_timeout_s"]
         satellite = _is_satellite(self.active[0])
         vad = self.cfg["listen"]["satellite_vad_aggressiveness" if satellite else "vad_aggressiveness"]
@@ -544,7 +579,7 @@ class VoiceLoop:
                 if self.ack_audio:
                     # Tell the user they were understood; Hermes is already
                     # being asked while this plays.
-                    self.speaker.play(*self.ack_audio)
+                    self.reply.play(*self.ack_audio)
                 reply, barged = self.respond(text, t0)
 
             if barged:
@@ -563,9 +598,9 @@ class VoiceLoop:
         self._set_state("speaking")
         self.events.send("reply", text=text)
         with BargeIn(self) as barge:
-            self.speaker.play(*self.synthesize(text))
-            self.speaker.wait()
-        self.flush_mics()
+            self.reply.play(*self.synthesize(text))
+            self.reply.wait()
+        self._flush_after_reply()
         return ("" if self.cancel.is_set() else text), barge.heard
 
     def respond(self, text: str, t0: float) -> tuple[str, bool]:
@@ -586,22 +621,26 @@ class VoiceLoop:
                         first_audio = time.monotonic() - t0
                         log.info("first audio after %.2fs", first_audio)
                         self._set_state("speaking")
-                    self.speaker.play(audio, rate)
+                    self.reply.play(audio, rate)
                     spoken.append(sentence)
                     self.events.send("reply", text=" ".join(spoken))
             except (httpx.HTTPError, httpx.StreamError) as e:
                 if not self.cancel.is_set():  # an abort also lands here
                     log.error("hermes request failed: %s", e)
-                    self.speaker.play(*self.synthesize(ERROR_REPLY))
+                    self.reply.play(*self.synthesize(ERROR_REPLY))
                     spoken = [ERROR_REPLY]
-            self.speaker.wait()
-        self.flush_mics()  # discard Taco's own voice picked up by the mics
+            self.reply.wait()
+        self._flush_after_reply()  # discard Taco's own voice picked up by the mics
         log.info("reply done in %.2fs: %r", time.monotonic() - t0, " ".join(spoken))
         # A cancelled reply never invites a follow-up question.
         return ("" if self.cancel.is_set() else " ".join(spoken)), barge.heard
 
     def _play_and_wait(self, audio, rate) -> None:
+        # The wake chime plays in the kitchen, and in the turn's room too.
         self.speaker.play(audio, rate)
+        if self.reply is not self.speaker:
+            self.reply.play(audio, rate)
+            self.reply.wait()
         self.speaker.wait()
         if _is_satellite(self.active[0]):
             # A satellite's audio arrives a few hundred ms late, so the end of

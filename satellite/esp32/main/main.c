@@ -31,6 +31,10 @@
  *   UPDATE           check for new firmware now
  *   AFE on|off       switch the speech front end (kept in NVS; restarts,
  *                    but never while a new image is still on trial)
+ *   AUDIO <n>        then n bytes of 16 kHz mono s16le: Taco's reply, for the
+ *                    board's speaker (ES8311). Taco paces it in real time.
+ *   STOP             drop reply audio that hasn't played yet
+ *   VOLUME <0-100>   speaker volume
  *
  * Firmware updates (ota task): at boot and every OTA_CHECK_S the board asks
  * taco-voice, on the same port, "TACO-OTA <name> <token> <version>". If the
@@ -83,11 +87,13 @@ static const char *TAG = "taco-sat";
 #define PIN_I2S_BCLK  13
 #define PIN_I2S_WS    14
 #define PIN_I2S_DIN   15   // ES7210 ASDOUT
+#define PIN_I2S_DOUT  16   // ES8311 DSDIN (the speaker)
 #define PIN_LED_RING  38   // 7 WS2812s (RGB order, per Waveshare's demo)
 #define RING_LEDS     7
 // The TCA9555 I/O expander (I2C 0x20) has the three user keys, pressed = low:
-// K1 = P9, K2 = P10, K3 = P11. P8 enables the speaker amp (unused so far).
+// K1 = P9, K2 = P10, K3 = P11. P8 enables the speaker amp, active high.
 #define KEY_MUTE      IO_EXPANDER_PIN_NUM_10   // K2, the middle key
+#define AMP_ENABLE    IO_EXPANDER_PIN_NUM_8
 #define RING_MAX      48   // brightness cap, 0-255: this sits in a living room
 
 #define SAMPLE_RATE   16000
@@ -132,6 +138,17 @@ static int s_out_ch = 1;                   // channels in each streamed frame
 static const esp_afe_sr_iface_t *s_afe_if;
 static esp_afe_sr_data_t *s_afe;
 static int s_feed_chunk;                   // samples per channel per feed()
+
+// The speaker: reply audio from Taco (AUDIO lines) -> s_play -> speaker task
+// -> ES8311. The amp is switched by the ring task, which owns the expander.
+#define PLAY_BYTES    (SAMPLE_RATE * 2 * 4)   // 4 s of mono s16, in PSRAM
+#define PLAY_SAMPLES  320                     // 20 ms per write
+#define SPEAKER_VOLUME_DEFAULT 70
+static esp_codec_dev_handle_t s_spk;
+static StreamBufferHandle_t s_play;
+static volatile bool s_play_stop;          // STOP: drop what's queued
+static volatile bool s_amp_on;             // wanted state of the amp
+static volatile bool s_mic_alive;          // the mics have shown real signal
 
 static bool s_pending_verify;      // running a new image that hasn't proved itself
 static char s_bad_version[32];     // the image that last rolled back; never retaken
@@ -192,9 +209,11 @@ static esp_codec_dev_handle_t mic_start(void)
 
     // The ESP32 is the I2S master: the ES7210 (and the ES8311 sharing the
     // bus) take MCLK/BCLK/LRCK from it rather than making their own.
-    i2s_chan_handle_t rx;
+    // Full duplex: the speaker's TX shares the mics' clocks and frame format.
+    i2s_chan_handle_t tx, rx;
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
-    ESP_ERROR_CHECK(i2s_new_channel(&chan_cfg, NULL, &rx));
+    chan_cfg.auto_clear_after_cb = true;   // silence when there's nothing to play
+    ESP_ERROR_CHECK(i2s_new_channel(&chan_cfg, &tx, &rx));
     i2s_std_config_t std_cfg = {
         .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(SAMPLE_RATE),
         .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_32BIT, I2S_SLOT_MODE_STEREO),
@@ -202,14 +221,16 @@ static esp_codec_dev_handle_t mic_start(void)
             .mclk = PIN_I2S_MCLK,
             .bclk = PIN_I2S_BCLK,
             .ws = PIN_I2S_WS,
-            .dout = I2S_GPIO_UNUSED,
+            .dout = PIN_I2S_DOUT,
             .din = PIN_I2S_DIN,
         },
     };
+    ESP_ERROR_CHECK(i2s_channel_init_std_mode(tx, &std_cfg));
     ESP_ERROR_CHECK(i2s_channel_init_std_mode(rx, &std_cfg));
+    ESP_ERROR_CHECK(i2s_channel_enable(tx));
     ESP_ERROR_CHECK(i2s_channel_enable(rx));
 
-    audio_codec_i2s_cfg_t i2s_if_cfg = {.port = I2S_NUM_0, .rx_handle = rx};
+    audio_codec_i2s_cfg_t i2s_if_cfg = {.port = I2S_NUM_0, .rx_handle = rx, .tx_handle = tx};
     const audio_codec_data_if_t *data_if = audio_codec_new_i2s_data(&i2s_if_cfg);
     audio_codec_i2c_cfg_t ctrl_cfg = {
         .port = I2C_NUM_0,
@@ -242,6 +263,31 @@ static esp_codec_dev_handle_t mic_start(void)
     ESP_ERROR_CHECK(esp_codec_dev_open(mic, &fs) == ESP_CODEC_DEV_OK ? ESP_OK : ESP_FAIL);
     esp_codec_dev_set_in_gain(mic, MIC_GAIN_DB);
     ESP_LOGI(TAG, "mic ready: %d Hz, gain %.1f dB", SAMPLE_RATE, MIC_GAIN_DB);
+
+    // The speaker DAC, opened with exactly the mics' format: the two share
+    // one I2S controller, and a different format would reclock the mics.
+    ctrl_cfg.addr = ES8311_CODEC_DEFAULT_ADDR;
+    es8311_codec_cfg_t es8311_cfg = {
+        .ctrl_if = audio_codec_new_i2c_ctrl(&ctrl_cfg),
+        .gpio_if = audio_codec_new_gpio(),
+        .codec_mode = ESP_CODEC_DEV_WORK_MODE_DAC,
+        .pa_pin = -1,            // the amp is on the I/O expander (AMP_ENABLE)
+        .use_mclk = true,
+        .hw_gain = {.pa_voltage = 5.0, .codec_dac_voltage = 3.3},
+    };
+    esp_codec_dev_cfg_t spk_cfg = {
+        .dev_type = ESP_CODEC_DEV_TYPE_OUT,
+        .codec_if = es8311_codec_new(&es8311_cfg),
+        .data_if = data_if,
+    };
+    s_spk = spk_cfg.codec_if ? esp_codec_dev_new(&spk_cfg) : NULL;
+    if (s_spk && esp_codec_dev_open(s_spk, &fs) == ESP_CODEC_DEV_OK) {
+        esp_codec_dev_set_out_vol(s_spk, SPEAKER_VOLUME_DEFAULT);
+        ESP_LOGI(TAG, "speaker ready");
+    } else {
+        ESP_LOGE(TAG, "ES8311 not found; no replies on this board");
+        s_spk = NULL;
+    }
     return mic;
 }
 
@@ -340,6 +386,45 @@ static void afe_task(void *arg)
     }
 }
 
+// -- Speaker --------------------------------------------------------------------------
+
+static void speaker_task(void *arg)
+{
+    static int16_t mono[PLAY_SAMPLES];
+    static int32_t slots[PLAY_SAMPLES * 2];   // the I2S frame: two 32-bit slots
+    int64_t last_audio = 0;
+    while (true) {
+        size_t got = xStreamBufferReceive(s_play, mono, sizeof(mono), pdMS_TO_TICKS(50));
+        if (s_play_stop) {
+            while (xStreamBufferReceive(s_play, mono, sizeof(mono), 0)) {
+            }
+            s_play_stop = false;
+            got = 0;
+        }
+        int64_t now = esp_timer_get_time();
+        if (got == 0) {
+            if (s_amp_on && now - last_audio > 300000) {
+                s_amp_on = false;            // no hiss between replies
+            }
+            continue;
+        }
+        if (got & 1) {   // keep samples whole
+            xStreamBufferReceive(s_play, (uint8_t *)mono + got, 1, portMAX_DELAY);
+            got++;
+        }
+        if (!s_amp_on) {
+            s_amp_on = true;
+            vTaskDelay(pdMS_TO_TICKS(80));   // the ring task switches it within 40 ms
+        }
+        int n = got / 2;
+        for (int i = 0; i < n; i++) {
+            slots[2 * i] = slots[2 * i + 1] = (int32_t)mono[i] << 16;
+        }
+        esp_codec_dev_write(s_spk, slots, n * 2 * sizeof(int32_t));
+        last_audio = esp_timer_get_time();
+    }
+}
+
 // -- Mic task -----------------------------------------------------------------------
 
 static void mic_task(void *arg)
@@ -359,6 +444,9 @@ static void mic_task(void *arg)
         for (int i = 0; i < FRAME_SAMPLES; i++) {
             const int16_t *f = &quad[ADC_CHANNELS * i];
             mono[i] = MUTED() ? 0 : (int16_t)(((int32_t)f[MIC_A] + f[MIC_B]) / 2);
+            if (!s_mic_alive && (f[MIC_A] > 2 || f[MIC_A] < -2)) {
+                s_mic_alive = true;   // about -84 dBFS: a working mic, not zeros
+            }
             for (int c = 0; c < ADC_CHANNELS && LEVELS_EVERY_S; c++) {
                 sumsq[c] += (double)f[c] * f[c];
                 int a = f[c] < 0 ? -f[c] : f[c];
@@ -424,7 +512,8 @@ static int taco_connect(void)
 {
     int sock = tcp_open();
     char hello[160];
-    snprintf(hello, sizeof(hello), "TACO %s %s afe=%s ch=%d\n", SAT_NAME, SAT_TOKEN, s_afe_status, s_out_ch);
+    snprintf(hello, sizeof(hello), "TACO %s %s afe=%s ch=%d spk=%d\n", SAT_NAME, SAT_TOKEN, s_afe_status,
+             s_out_ch, s_spk ? 1 : 0);
     if (sock >= 0 && send(sock, hello, strlen(hello), 0) < 0) {
         close(sock);
         return -1;
@@ -471,6 +560,13 @@ static void handle_line(char *line)
             s_afe_restart = true;
             ESP_LOGI(TAG, "speech front end %s; restarting", arg);
         }
+    } else if (strcmp(word, "STOP") == 0) {
+        s_play_stop = true;
+    } else if (strcmp(word, "VOLUME") == 0 && arg[0]) {
+        int vol = atoi(arg);
+        if (s_spk && vol >= 0 && vol <= 100) {
+            esp_codec_dev_set_out_vol(s_spk, vol);
+        }
     } else if (strcmp(word, "UPDATE") == 0) {
         ESP_LOGI(TAG, "taco has new firmware");
         if (s_ota_task) {
@@ -481,15 +577,38 @@ static void handle_line(char *line)
     }
 }
 
-// Drain whatever control bytes have arrived, without waiting.
+// Drain whatever has arrived from Taco, without waiting: control lines, and
+// after an "AUDIO <n>" line, n bytes of reply audio for the speaker.
+static size_t s_audio_left;
+
 static void read_control(int sock, char *line, size_t *len, size_t size)
 {
-    char c;
-    while (recv(sock, &c, 1, MSG_DONTWAIT) == 1) {
+    static uint8_t buf[1024];
+    while (true) {
+        if (s_audio_left) {
+            int n = recv(sock, buf, s_audio_left < sizeof(buf) ? s_audio_left : sizeof(buf), MSG_DONTWAIT);
+            if (n <= 0) {
+                return;
+            }
+            s_audio_left -= n;
+            if (s_play && !s_play_stop) {
+                // Taco paces it, so the buffer has room; if not, drop rather than stall the mics.
+                xStreamBufferSend(s_play, buf, n, pdMS_TO_TICKS(100));
+            }
+            continue;
+        }
+        char c;
+        if (recv(sock, &c, 1, MSG_DONTWAIT) != 1) {
+            return;
+        }
         if (c == '\n') {
             line[*len] = 0;
-            handle_line(line);
             *len = 0;
+            if (strncmp(line, "AUDIO ", 6) == 0) {
+                s_audio_left = strtoul(line + 6, NULL, 10);
+            } else {
+                handle_line(line);
+            }
         } else if (*len + 1 < size) {
             line[(*len)++] = c;
         }
@@ -512,12 +631,15 @@ static void net_task(void *arg)
         ESP_LOGI(TAG, "streaming to %s:%d", TACO_HOST, TACO_PORT);
         backoff_ms = 1000;
         xStreamBufferReset(s_audio);   // start live, not with stale audio
+        s_audio_left = 0;
         int64_t since = esp_timer_get_time();
         char ctl[64];
         size_t ctl_len = 0;
         while (true) {
             read_control(sock, ctl, &ctl_len, sizeof(ctl));
-            if (s_pending_verify && esp_timer_get_time() - since > STREAM_OK_S * 1000000LL) {
+            // A new image proves itself by streaming, and with mics that really
+            // hear something: a broken audio path would otherwise stream zeros.
+            if (s_pending_verify && s_mic_alive && esp_timer_get_time() - since > STREAM_OK_S * 1000000LL) {
                 esp_ota_mark_app_valid_cancel_rollback();
                 s_pending_verify = false;
                 ESP_LOGI(TAG, "firmware %s confirmed", esp_app_get_description()->version);
@@ -633,10 +755,17 @@ static void ring_task(void *arg)
         exio = NULL;
     } else {
         esp_io_expander_set_dir(exio, KEY_MUTE, IO_EXPANDER_INPUT);
+        esp_io_expander_set_dir(exio, AMP_ENABLE, IO_EXPANDER_OUTPUT);
+        esp_io_expander_set_level(exio, AMP_ENABLE, 0);
     }
+    bool amp = false;
     bool was_down = false;
     int same = 0;
     while (true) {
+        if (exio && s_amp_on != amp) {
+            amp = s_amp_on;
+            esp_io_expander_set_level(exio, AMP_ENABLE, amp);
+        }
         uint32_t t_ms = esp_timer_get_time() / 1000;
         if (ring) {
             ring_frame(ring, t_ms);
@@ -824,6 +953,12 @@ void app_main(void)
     load_settings();
     s_audio = xStreamBufferCreate(STREAM_BYTES, FRAME_BYTES);
     esp_codec_dev_handle_t mic = mic_start();
+    if (s_spk) {
+        s_play = xStreamBufferCreateWithCaps(PLAY_BYTES, 2, MALLOC_CAP_SPIRAM);
+        if (!s_play) {
+            s_spk = NULL;
+        }
+    }
     ESP_LOGI(TAG, "PSRAM %u KB", (unsigned)(esp_psram_is_initialized() ? esp_psram_get_size() / 1024 : 0));
     if (s_afe_want) {
         if (afe_start()) {
@@ -841,4 +976,7 @@ void app_main(void)
     xTaskCreatePinnedToCore(ota_task, "ota", 6144, NULL, 3, &s_ota_task, 0);
     xTaskCreatePinnedToCore(ring_task, "ring", 4096, NULL, 2, NULL, 0);
     xTaskCreatePinnedToCore(event_task, "event", 4096, NULL, 3, &s_event_task, 0);
+    if (s_spk) {
+        xTaskCreatePinnedToCore(speaker_task, "speaker", 4096, NULL, 6, NULL, 1);
+    }
 }
