@@ -51,6 +51,13 @@ MADE_FOR_YOU = re.compile(r"^(?:my )?(?:discover weekly|release radar|daily mix 
 LINK = re.compile(r"(?:https?://open\.spotify\.com/(?:intl-\w+/)?|spotify:)(playlist|album|artist|track)[/:]([A-Za-z0-9]+)")
 
 
+_MADE_FOR_YOU_NAMES = ("discover weekly", "release radar", "on repeat", "repeat rewind", "time capsule", "daylist")
+
+
+def _strip_my(q: str) -> str:
+    return re.sub(r"^(?:my|your)\s+", "", q.strip(), flags=re.I)
+
+
 def to_uri(link: str) -> str | None:
     """spotify:playlist:<id> from a share link or a URI; None if it's neither."""
     m = LINK.search(link.strip())
@@ -211,11 +218,15 @@ class SpotifyClient:
         return self._user_id
 
     def is_made_for_you(self, query: str) -> bool:
-        return bool(MADE_FOR_YOU.match(_norm(query)))
+        """Discover Weekly and the like, also as speech recognition garbles
+        them ("release look radar")."""
+        q = _norm(_strip_my(query))
+        return bool(MADE_FOR_YOU.match(q)) or any(_close(n, q) >= 0.8 for n in _MADE_FOR_YOU_NAMES)
 
     def _linked(self, query: str) -> Playable | None:
         """A playlist the household listed in [spotify.playlists]."""
-        if not self.links:
+        query = _strip_my(query)
+        if not self.links or not query:
             return None
         name = max(self.links, key=lambda n: _close(n, query))
         if _close(name, query) >= 0.8:
@@ -230,6 +241,9 @@ class SpotifyClient:
         query = query.strip()
         if not by and kind is None and (linked := self._linked(query)):
             return linked
+        # "play my ..." is always the household's own, whichever way it was parsed.
+        if re.match(r"(?:my|your)\s", query, re.I):
+            mine, query = True, _strip_my(query)
         mine = mine or self.is_made_for_you(query)
         if playlist or kind == "playlist" or mine:
             found = await self._my_playlist(query)

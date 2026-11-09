@@ -157,6 +157,9 @@ class FakeApi:
         self.asked.append(query)
         return self.thing
 
+    def is_made_for_you(self, query):
+        return False
+
 
 def _assistant(library_hit: bool, spotify_thing, monkeypatch):
     from taco.core import assistant as mod
@@ -297,3 +300,24 @@ def test_an_album_beats_a_public_playlist_of_the_same_name(go):
     fake = FakeSpotify(search={"album": [ALBUM], "playlist": [namesake], "artist": [], "track": []})
     thing = go(fake, lambda c: c.resolve("kind of blue"))
     assert thing.kind == "album" and thing.context_uri == "spotify:album:kob"
+
+
+
+@pytest.mark.parametrize("query", ["my release look radar", "release look radar", "my release radar"])
+def test_a_garbled_my_playlist_still_finds_the_link(tmp_path, query):
+    fake = FakeSpotify(search={"playlist": [{"name": "My Release Radar", "uri": "spotify:playlist:stranger"}]})
+    cfg = {**CFG, "playlists": {"release radar": "https://open.spotify.com/playlist/37i9dQZEVXbsZV3CF6e6dx"}}
+
+    async def go():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(fake.handler)) as http:
+            return await SpotifyClient(cfg, http, tmp_path).resolve(query)
+    thing = asyncio.run(go())
+    assert thing.context_uri == "spotify:playlist:37i9dQZEVXbsZV3CF6e6dx"
+    assert not [c for c in fake.calls if c[1] == "/search"]
+
+
+def test_play_my_anything_never_plays_a_stranger(go):
+    fake = FakeSpotify(search={"playlist": [{"name": "My Road Trip", "uri": "spotify:playlist:stranger"}],
+                               "artist": [], "album": [], "track": []})
+    assert go(fake, lambda c: c.resolve("my road trip")) is None   # not one of the household's
+    assert not [c for c in fake.calls if c[1] == "/search"]
