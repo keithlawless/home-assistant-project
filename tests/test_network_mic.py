@@ -384,6 +384,15 @@ def test_handshake_reports_a_speaker():
         sock.sendall(FRAME.tobytes())
         mic.read(timeout=2)
         assert mic.speaker
+        assert mic.speaker_rate == 16000
+    with connect_with(mic, "afe=on ch=1 spk=48000") as sock:   # 48 kHz firmware
+        sock.sendall(FRAME.tobytes())
+        wait_for(lambda: mic.afe == "on")
+        assert mic.speaker and mic.speaker_rate == 48000
+    with connect_with(mic, "afe=off ch=1 spk=0") as sock:
+        sock.sendall(FRAME.tobytes())
+        wait_for(lambda: mic.afe == "off")
+        assert not mic.speaker
     with connect_with(mic, "afe=off ch=1") as sock:   # older firmware
         sock.sendall(FRAME.tobytes())
         wait_for(lambda: not mic.speaker)
@@ -396,12 +405,13 @@ def test_audio_is_framed_in_order_with_control_lines():
         mic.read(timeout=2)
         mic.send_line("STATE speaking here")
         assert mic.send_audio(b"\x01\x02\x03\x04")
+        assert mic.send_audio(b"\x05\x06", kind=b"MUSIC")
         mic.send_line("STOP")
         sock.settimeout(2)
         got = b""
         while not got.endswith(b"STOP\n"):
             got += sock.recv(4096)
-        assert got == b"STATE speaking here\nAUDIO 4\n\x01\x02\x03\x04STOP\n"
+        assert got == b"STATE speaking here\nAUDIO 4\n\x01\x02\x03\x04MUSIC 2\n\x05\x06STOP\n"
 
 
 def test_resample_to_16k():
@@ -410,6 +420,8 @@ def test_resample_to_16k():
     out = resample(tone, 22050)
     assert out.dtype == np.int16 and len(out) == 16000
     assert abs(int(np.abs(out).max()) - 10000) < 200
+    up = resample(tone, 22050, 48000)   # replies to a 48 kHz speaker
+    assert len(up) == 48000 and abs(int(np.abs(up[100:-100]).max()) - 10000) < 300
 
 
 class FakeSatForSpeaker:
@@ -450,6 +462,16 @@ def test_satellite_speaker_stop_tells_the_board():
     spk.wait()
     assert sat.lines == ["STOP"] and time.monotonic() - t < 0.5
     assert sum(n for _, n in sat.audio) < 32000 * 3
+
+
+def test_satellite_speaker_plays_at_the_boards_rate():
+    from taco.voice.audio import SatelliteSpeaker
+    sat = FakeSatForSpeaker()
+    sat.speaker_rate = 48000
+    spk = SatelliteSpeaker(sat)
+    spk.play(np.zeros(8000, dtype=np.int16), 16000)   # 0.5 s
+    spk.wait()
+    assert sum(n for _, n in sat.audio) == 48000      # 24000 samples at 48 kHz
 
 
 def _loop_for_replies(sat_speaker: bool, satellite_turn: bool):

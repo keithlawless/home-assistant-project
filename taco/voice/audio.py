@@ -218,7 +218,8 @@ class NetworkMicrophone(_FrameSource):
         # What the live connection's handshake said: front end on, channels.
         self.afe: str | None = None
         self.channels = 1
-        self.speaker = False   # the board can play replies (spk=1)
+        self.speaker = False   # the board can play replies (spk=<rate>)
+        self.speaker_rate = 16000   # what it plays at: spk=1 meant 16 kHz
         self.second = SatelliteChannel(self, ready)
         # Holds "on" or "off" to switch the speech front end (deploy/satellite-afe.sh).
         self.afe_file = Path(afe_file) if afe_file else None
@@ -253,14 +254,16 @@ class NetworkMicrophone(_FrameSource):
         except queue.Full:
             pass
 
-    def send_audio(self, pcm: bytes) -> bool:
-        """Queue reply audio (16 kHz mono s16) for the board's speaker, as
-        `AUDIO <n>` plus the bytes, in order with the control lines. Waits
-        briefly rather than drop audio when the queue is full."""
+    def send_audio(self, pcm: bytes, kind: bytes = b"AUDIO") -> bool:
+        """Queue audio (mono s16 at `speaker_rate`) for the board's speaker,
+        as `AUDIO <n>` plus the bytes, in order with the control lines; kind
+        b"MUSIC" goes to the board's music buffer instead, mixed with replies
+        (newer firmware). Waits briefly rather than drop audio when the queue
+        is full."""
         if self._conn is None:
             return False
         try:
-            self._out.put(b"AUDIO %d\n" % len(pcm) + pcm, timeout=1.0)
+            self._out.put(kind + b" %d\n" % len(pcm) + pcm, timeout=1.0)
             return True
         except queue.Full:
             return False
@@ -396,7 +399,7 @@ class NetworkMicrophone(_FrameSource):
                 self.second.last_frame = self.last_frame
                 old, self._conn = self._conn, conn
                 self.afe, self.channels = opts.get("afe"), channels
-                self.speaker = opts.get("spk") == "1"
+                self.speaker, self.speaker_rate = _speaker_option(opts.get("spk"))
             if old:
                 _close(old)
             log.info("satellite %r: connected from %s%s", self.name, ip,
@@ -442,10 +445,32 @@ def _close(conn: socket.socket) -> None:
     conn.close()
 
 
+def _speaker_option(value: str | None) -> tuple[bool, int]:
+    """The handshake's spk=: "1" (16 kHz firmware) or the rate it plays at."""
+    if value == "1":
+        return True, 16000
+    try:
+        rate = int(value or 0)
+    except ValueError:
+        rate = 0
+    return (True, rate) if rate >= 8000 else (False, 16000)
+
+
 def resample(audio: np.ndarray, rate: int, to: int = 16000) -> np.ndarray:
-    """Linear resampling of int16 mono audio; plenty for speech and chimes."""
+    """Resample int16 mono audio: polyphase (band-limited) when scipy is
+    there, which music to a 48 kHz speaker needs; else linear, which is
+    plenty for speech and chimes."""
     if rate == to or len(audio) == 0:
         return audio.astype(np.int16)
+    try:
+        from math import gcd
+
+        from scipy.signal import resample_poly
+        g = gcd(rate, to)
+        out = resample_poly(audio.astype(np.float32), to // g, rate // g)
+        return np.clip(out, -32768, 32767).astype(np.int16)
+    except ImportError:
+        pass
     n = int(round(len(audio) * to / rate))
     t = np.arange(n) * (rate / to)
     return np.interp(t, np.arange(len(audio)), audio.astype(np.float32)).astype(np.int16)
@@ -488,11 +513,12 @@ class SatelliteSpeaker:
         self._end = 0.0
 
     def _run(self) -> None:
-        chunk = int(16000 * self.CHUNK_S)
         while True:
             audio, rate = self._clips.get()
             try:
-                pcm = resample(audio, rate)
+                out = getattr(self.sat, "speaker_rate", 16000)
+                chunk = int(out * self.CHUNK_S)
+                pcm = resample(audio, rate, out)
                 for i in range(0, len(pcm), chunk):
                     if self._stopping.is_set():
                         break
@@ -502,7 +528,7 @@ class SatelliteSpeaker:
                     piece = pcm[i:i + chunk]
                     if not self.sat.send_audio(piece.tobytes()):
                         break   # disconnected: nothing to wait for
-                    self._end = max(time.monotonic(), self._end) + len(piece) / 16000
+                    self._end = max(time.monotonic(), self._end) + len(piece) / out
             finally:
                 self._clips.task_done()
                 if self._clips.empty():

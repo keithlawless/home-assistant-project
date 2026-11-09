@@ -14,9 +14,14 @@
  * Audio path: ES7210 ADC (I2C 0x40, all four inputs) -> I2S0 in 32-bit
  * stereo mode, which packs four 16-bit channels per frame (Waveshare's
  * layout: 0 = speaker reference, 1 = mic, 2 = unused, 3 = mic), with the
- * ESP32 as clock master -> mic task (mix the two mics to mono) -> stream
- * buffer -> net task -> socket. The two tasks are decoupled so a slow or
- * dropped connection never stalls I2S; audio is simply dropped instead.
+ * ESP32 as clock master -> mic task (decimate 48 -> 16 kHz, mix the two
+ * mics to mono) -> stream buffer -> net task -> socket. The two tasks are
+ * decoupled so a slow or dropped connection never stalls I2S; audio is
+ * simply dropped instead.
+ *
+ * The I2S bus runs at 48 kHz so the speaker (ES8311, mono) can play music
+ * at full bandwidth; the mics share its clocks, so the mic task low-passes
+ * and decimates them 3:1 to the 16 kHz everything downstream expects.
  *
  * Light and mute (ring task): the 7-LED ring shows Taco's state during a
  * turn that started in this room (listening, thinking, speaking) and stays
@@ -31,10 +36,15 @@
  *   UPDATE           check for new firmware now
  *   AFE on|off       switch the speech front end (kept in NVS; restarts,
  *                    but never while a new image is still on trial)
- *   AUDIO <n>        then n bytes of 16 kHz mono s16le: Taco's reply, for the
- *                    board's speaker (ES8311). Taco paces it in real time.
+ *   AUDIO <n>        then n bytes of mono s16le at the speaker rate (the
+ *                    handshake's spk=<rate>): Taco's reply, for the board's
+ *                    speaker (ES8311). Taco paces it in real time.
+ *   MUSIC <n>        the same, for music: its own buffer, mixed with replies
  *   STOP             drop reply audio that hasn't played yet
+ *   MSTOP            drop music that hasn't played yet
  *   VOLUME <0-100>   speaker volume
+ * A receive task reads these as they arrive, so a music stream never waits
+ * on the mic uplink.
  *
  * Firmware updates (ota task): at boot and every OTA_CHECK_S the board asks
  * taco-voice, on the same port, "TACO-OTA <name> <token> <version>". If the
@@ -45,6 +55,7 @@
  * too, via the bootloader).
  */
 
+#include <errno.h>
 #include <math.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -96,7 +107,11 @@ static const char *TAG = "taco-sat";
 #define AMP_ENABLE    IO_EXPANDER_PIN_NUM_8
 #define RING_MAX      48   // brightness cap, 0-255: this sits in a living room
 
-#define SAMPLE_RATE   16000
+#define SAMPLE_RATE   16000                // the mics, as streamed to Taco
+#define I2S_RATE      48000                // the bus, and the speaker
+#define DECIM         (I2S_RATE / SAMPLE_RATE)
+#define FIR_TAPS      127                  // decimation low-pass (odd, symmetric)
+#define FIR_CUTOFF_HZ 7200                 // -6 dB point; 8 kHz is the new Nyquist
 #define ADC_CHANNELS  4                    // per frame, see the audio path above
 #define MIC_A         1                    // the two mic channels
 #define MIC_B         3
@@ -141,12 +156,15 @@ static int s_feed_chunk;                   // samples per channel per feed()
 
 // The speaker: reply audio from Taco (AUDIO lines) -> s_play -> speaker task
 // -> ES8311. The amp is switched by the ring task, which owns the expander.
-#define PLAY_BYTES    (SAMPLE_RATE * 2 * 4)   // 4 s of mono s16, in PSRAM
-#define PLAY_SAMPLES  320                     // 20 ms per write
+#define PLAY_BYTES    (I2S_RATE * 2 * 4)      // 4 s of mono s16 replies, in PSRAM
+#define MUSIC_BYTES   (I2S_RATE * 2 * 2)      // 2 s of music
+#define PLAY_SAMPLES  (I2S_RATE / 50)         // 20 ms per write
 #define SPEAKER_VOLUME_DEFAULT 70
 static esp_codec_dev_handle_t s_spk;
 static StreamBufferHandle_t s_play;
-static volatile bool s_play_stop;          // STOP: drop what's queued
+static StreamBufferHandle_t s_music;
+static volatile bool s_play_stop;          // STOP: drop the queued reply
+static volatile bool s_music_stop;         // MSTOP: drop the queued music
 static volatile bool s_amp_on;             // wanted state of the amp
 static volatile bool s_mic_alive;          // the mics have shown real signal
 
@@ -213,9 +231,12 @@ static esp_codec_dev_handle_t mic_start(void)
     i2s_chan_handle_t tx, rx;
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
     chan_cfg.auto_clear_after_cb = true;   // silence when there's nothing to play
+    // 6 x 10 ms of DMA: the mic task decimates a frame between reads.
+    chan_cfg.dma_desc_num = 6;
+    chan_cfg.dma_frame_num = I2S_RATE / 100;
     ESP_ERROR_CHECK(i2s_new_channel(&chan_cfg, &tx, &rx));
     i2s_std_config_t std_cfg = {
-        .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(SAMPLE_RATE),
+        .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(I2S_RATE),
         .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_32BIT, I2S_SLOT_MODE_STEREO),
         .gpio_cfg = {
             .mclk = PIN_I2S_MCLK,
@@ -256,13 +277,13 @@ static esp_codec_dev_handle_t mic_start(void)
         abort();
     }
     esp_codec_dev_sample_info_t fs = {
-        .sample_rate = SAMPLE_RATE,
+        .sample_rate = I2S_RATE,
         .channel = 2,           // two 32-bit slots = four 16-bit channels
         .bits_per_sample = 32,
     };
     ESP_ERROR_CHECK(esp_codec_dev_open(mic, &fs) == ESP_CODEC_DEV_OK ? ESP_OK : ESP_FAIL);
     esp_codec_dev_set_in_gain(mic, MIC_GAIN_DB);
-    ESP_LOGI(TAG, "mic ready: %d Hz, gain %.1f dB", SAMPLE_RATE, MIC_GAIN_DB);
+    ESP_LOGI(TAG, "mic ready: %d Hz bus, %d Hz out, gain %.1f dB", I2S_RATE, SAMPLE_RATE, MIC_GAIN_DB);
 
     // The speaker DAC, opened with exactly the mics' format: the two share
     // one I2S controller, and a different format would reclock the mics.
@@ -304,7 +325,7 @@ static bool afe_start(void)
     if (!cfg) {
         return false;
     }
-    cfg->aec_init = false;       // nothing plays on this board yet
+    cfg->aec_init = s_spk != NULL;   // cancel the board's own speaker (reference = R)
     cfg->se_init = true;         // BSS: split the two mics into separate sources
     cfg->ns_init = false;
     cfg->vad_init = false;       // taco-voice does VAD,
@@ -388,37 +409,45 @@ static void afe_task(void *arg)
 
 // -- Speaker --------------------------------------------------------------------------
 
+// Up to one 20 ms write's worth of samples from a play buffer, never waiting.
+// The receive task only ever queues whole samples.
+static int take(StreamBufferHandle_t sb, volatile bool *stop, int16_t *dst)
+{
+    if (*stop) {
+        while (xStreamBufferReceive(sb, dst, PLAY_SAMPLES * 2, 0)) {
+        }
+        *stop = false;
+        return 0;
+    }
+    return xStreamBufferReceive(sb, dst, PLAY_SAMPLES * 2, 0) / 2;
+}
+
+// Mix replies and music into the speaker. The I2S write blocks on DMA,
+// which paces the loop; Taco keeps both buffers a little ahead.
 static void speaker_task(void *arg)
 {
-    static int16_t mono[PLAY_SAMPLES];
+    static int16_t reply[PLAY_SAMPLES], music[PLAY_SAMPLES];
     static int32_t slots[PLAY_SAMPLES * 2];   // the I2S frame: two 32-bit slots
     int64_t last_audio = 0;
     while (true) {
-        size_t got = xStreamBufferReceive(s_play, mono, sizeof(mono), pdMS_TO_TICKS(50));
-        if (s_play_stop) {
-            while (xStreamBufferReceive(s_play, mono, sizeof(mono), 0)) {
-            }
-            s_play_stop = false;
-            got = 0;
-        }
-        int64_t now = esp_timer_get_time();
-        if (got == 0) {
-            if (s_amp_on && now - last_audio > 300000) {
+        int r = take(s_play, &s_play_stop, reply);
+        int m = take(s_music, &s_music_stop, music);
+        int n = r > m ? r : m;
+        if (n == 0) {
+            if (s_amp_on && esp_timer_get_time() - last_audio > 300000) {
                 s_amp_on = false;            // no hiss between replies
             }
+            vTaskDelay(pdMS_TO_TICKS(10));
             continue;
-        }
-        if (got & 1) {   // keep samples whole
-            xStreamBufferReceive(s_play, (uint8_t *)mono + got, 1, portMAX_DELAY);
-            got++;
         }
         if (!s_amp_on) {
             s_amp_on = true;
             vTaskDelay(pdMS_TO_TICKS(80));   // the ring task switches it within 40 ms
         }
-        int n = got / 2;
         for (int i = 0; i < n; i++) {
-            slots[2 * i] = slots[2 * i + 1] = (int32_t)mono[i] << 16;
+            int32_t v = (i < r ? reply[i] : 0) + (i < m ? music[i] : 0);
+            v = v > 32767 ? 32767 : v < -32768 ? -32768 : v;
+            slots[2 * i] = slots[2 * i + 1] = v << 16;
         }
         esp_codec_dev_write(s_spk, slots, n * 2 * sizeof(int32_t));
         last_audio = esp_timer_get_time();
@@ -427,20 +456,85 @@ static void speaker_task(void *arg)
 
 // -- Mic task -----------------------------------------------------------------------
 
+// The 3:1 decimator: a Kaiser-windowed sinc low-pass, run only at the
+// output rate, on the three channels in use (the reference and both mics).
+static float s_fir[FIR_TAPS];
+static const int DECIM_CH[] = {0, MIC_A, MIC_B};
+#define DECIM_NCH (sizeof(DECIM_CH) / sizeof(DECIM_CH[0]))
+#define HIST      (FIR_TAPS - 1)
+#define BUS_SAMPLES (FRAME_SAMPLES * DECIM)
+
+static double bessel_i0(double x)
+{
+    double sum = 1, term = 1;
+    for (int k = 1; k < 30; k++) {
+        term *= (x / (2 * k)) * (x / (2 * k));
+        sum += term;
+    }
+    return sum;
+}
+
+static void fir_init(void)
+{
+    const double fc = (double)FIR_CUTOFF_HZ / I2S_RATE, beta = 7.0;
+    const int mid = HIST / 2;
+    double sum = 0;
+    for (int n = 0; n < FIR_TAPS; n++) {
+        int x = n - mid;
+        double h = x == 0 ? 2 * fc : sin(2 * M_PI * fc * x) / (M_PI * x);
+        double r = (double)x / mid;
+        h *= bessel_i0(beta * sqrt(1 - r * r)) / bessel_i0(beta);
+        s_fir[n] = h;
+        sum += h;
+    }
+    for (int n = 0; n < FIR_TAPS; n++) {
+        s_fir[n] /= sum;   // unity gain at DC
+    }
+}
+
+// 80 ms of the 48 kHz bus (four channels) -> 80 ms at 16 kHz, same layout.
+static void decimate(const int16_t *bus, int16_t *quad)
+{
+    static float x[DECIM_NCH][HIST + BUS_SAMPLES];   // history, then this frame
+    const int mid = HIST / 2;
+    for (int c = 0; c < DECIM_NCH; c++) {
+        float *xc = x[c];
+        for (int i = 0; i < BUS_SAMPLES; i++) {
+            xc[HIST + i] = bus[i * ADC_CHANNELS + DECIM_CH[c]];
+        }
+        for (int i = 0; i < FRAME_SAMPLES; i++) {
+            const float *w = &xc[i * DECIM];
+            float y = s_fir[mid] * w[mid];
+            for (int k = 0; k < mid; k++) {
+                y += s_fir[k] * (w[k] + w[HIST - k]);   // symmetric taps
+            }
+            int v = lrintf(y);
+            quad[i * ADC_CHANNELS + DECIM_CH[c]] = v > 32767 ? 32767 : v < -32768 ? -32768 : v;
+        }
+        memmove(xc, &xc[BUS_SAMPLES], HIST * sizeof(float));
+    }
+    for (int i = 0; i < FRAME_SAMPLES; i++) {
+        quad[i * ADC_CHANNELS + 2] = 0;   // the unused input
+    }
+}
+
 static void mic_task(void *arg)
 {
     esp_codec_dev_handle_t mic = arg;
+    int16_t *bus = heap_caps_malloc(BUS_SAMPLES * ADC_CHANNELS * sizeof(int16_t), MALLOC_CAP_SPIRAM);
     static int16_t quad[FRAME_SAMPLES * ADC_CHANNELS];
     static int16_t mono[FRAME_SAMPLES];
     double sumsq[ADC_CHANNELS] = {0};
     int peak[ADC_CHANNELS] = {0};
     int frames = 0;
+    fir_init();
     while (true) {
-        if (esp_codec_dev_read(mic, quad, sizeof(quad)) != ESP_CODEC_DEV_OK) {
+        if (esp_codec_dev_read(mic, bus, BUS_SAMPLES * ADC_CHANNELS * sizeof(int16_t)) != ESP_CODEC_DEV_OK) {
             ESP_LOGW(TAG, "mic read failed");
             vTaskDelay(pdMS_TO_TICKS(100));
             continue;
         }
+        decimate(bus, quad);
         for (int i = 0; i < FRAME_SAMPLES; i++) {
             const int16_t *f = &quad[ADC_CHANNELS * i];
             mono[i] = MUTED() ? 0 : (int16_t)(((int32_t)f[MIC_A] + f[MIC_B]) / 2);
@@ -505,6 +599,9 @@ static int tcp_open(void)
     // If Taco stops reading, fail the send rather than hang forever.
     struct timeval tv = {.tv_sec = 5};
     setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    // The receive task wakes at least this often, to notice a closed socket.
+    struct timeval rtv = {.tv_sec = 1};
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &rtv, sizeof(rtv));
     return sock;
 }
 
@@ -513,7 +610,7 @@ static int taco_connect(void)
     int sock = tcp_open();
     char hello[160];
     snprintf(hello, sizeof(hello), "TACO %s %s afe=%s ch=%d spk=%d\n", SAT_NAME, SAT_TOKEN, s_afe_status,
-             s_out_ch, s_spk ? 1 : 0);
+             s_out_ch, s_spk ? I2S_RATE : 0);   // spk = the rate it plays at
     if (sock >= 0 && send(sock, hello, strlen(hello), 0) < 0) {
         close(sock);
         return -1;
@@ -562,6 +659,8 @@ static void handle_line(char *line)
         }
     } else if (strcmp(word, "STOP") == 0) {
         s_play_stop = true;
+    } else if (strcmp(word, "MSTOP") == 0) {
+        s_music_stop = true;
     } else if (strcmp(word, "VOLUME") == 0 && arg[0]) {
         int vol = atoi(arg);
         if (s_spk && vol >= 0 && vol <= 100) {
@@ -577,40 +676,93 @@ static void handle_line(char *line)
     }
 }
 
-// Drain whatever has arrived from Taco, without waiting: control lines, and
-// after an "AUDIO <n>" line, n bytes of reply audio for the speaker.
-static size_t s_audio_left;
+// The receive task: reads everything Taco sends on the live connection as
+// it arrives. Control lines, and after "AUDIO <n>" or "MUSIC <n>", n bytes of
+// audio for that play buffer. net_task owns the socket: it hands it over in
+// s_rx_sock, and takes it back (-1) before closing it.
+static volatile int s_rx_sock = -1;
+static volatile bool s_rx_busy;   // the receive task may be using a socket
+static volatile bool s_rx_dead;   // the connection closed under it
 
-static void read_control(int sock, char *line, size_t *len, size_t size)
+// Queue audio bytes, whole samples only: a byte split across two reads waits
+// in *carry for its partner.
+static void queue_audio(StreamBufferHandle_t sb, volatile bool *stop, TickType_t wait,
+                        const uint8_t *data, size_t n, int *carry)
 {
-    static uint8_t buf[1024];
+    if (!sb || *stop) {
+        *carry = -1;
+        return;
+    }
+    if (*carry >= 0 && n) {
+        uint8_t pair[2] = {(uint8_t)*carry, data[0]};
+        xStreamBufferSend(sb, pair, 2, wait);
+        *carry = -1;
+        data++;
+        n--;
+    }
+    size_t even = n & ~(size_t)1;
+    if (even) {
+        // Taco paces it, so there's room; if not, drop rather than stall.
+        xStreamBufferSend(sb, data, even, wait);
+    }
+    if (n & 1) {
+        *carry = data[n - 1];
+    }
+}
+
+static void rx_task(void *arg)
+{
+    static uint8_t buf[2048];
+    char line[64];
     while (true) {
-        if (s_audio_left) {
-            int n = recv(sock, buf, s_audio_left < sizeof(buf) ? s_audio_left : sizeof(buf), MSG_DONTWAIT);
-            if (n <= 0) {
-                return;
-            }
-            s_audio_left -= n;
-            if (s_play && !s_play_stop) {
-                // Taco paces it, so the buffer has room; if not, drop rather than stall the mics.
-                xStreamBufferSend(s_play, buf, n, pdMS_TO_TICKS(100));
-            }
+        int sock = s_rx_sock;
+        if (sock < 0) {
+            s_rx_busy = false;
+            vTaskDelay(pdMS_TO_TICKS(20));
             continue;
         }
-        char c;
-        if (recv(sock, &c, 1, MSG_DONTWAIT) != 1) {
-            return;
-        }
-        if (c == '\n') {
-            line[*len] = 0;
-            *len = 0;
-            if (strncmp(line, "AUDIO ", 6) == 0) {
-                s_audio_left = strtoul(line + 6, NULL, 10);
-            } else {
-                handle_line(line);
+        s_rx_busy = true;
+        size_t len = 0, left = 0;   // line so far; audio bytes still to come
+        bool to_music = false;
+        int carry = -1;
+        while (s_rx_sock == sock) {
+            int n = recv(sock, buf, sizeof(buf), 0);
+            if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
+                s_rx_dead = true;
+                break;
             }
-        } else if (*len + 1 < size) {
-            line[(*len)++] = c;
+            for (int i = 0; i < n;) {
+                if (left) {
+                    size_t k = left < (size_t)(n - i) ? left : (size_t)(n - i);
+                    if (to_music) {
+                        queue_audio(s_music, &s_music_stop, pdMS_TO_TICKS(500), &buf[i], k, &carry);
+                    } else {
+                        queue_audio(s_play, &s_play_stop, pdMS_TO_TICKS(100), &buf[i], k, &carry);
+                    }
+                    left -= k;
+                    i += k;
+                    continue;
+                }
+                char c = buf[i++];
+                if (c != '\n') {
+                    if (len + 1 < sizeof(line)) {
+                        line[len++] = c;
+                    }
+                    continue;
+                }
+                line[len] = 0;
+                len = 0;
+                carry = -1;
+                if (strncmp(line, "AUDIO ", 6) == 0 || strncmp(line, "MUSIC ", 6) == 0) {
+                    to_music = line[0] == 'M';
+                    left = strtoul(line + 6, NULL, 10);
+                } else {
+                    handle_line(line);
+                }
+            }
+        }
+        while (s_rx_sock == sock) {   // wait for net_task to take it back
+            vTaskDelay(pdMS_TO_TICKS(20));
         }
     }
 }
@@ -631,12 +783,10 @@ static void net_task(void *arg)
         ESP_LOGI(TAG, "streaming to %s:%d", TACO_HOST, TACO_PORT);
         backoff_ms = 1000;
         xStreamBufferReset(s_audio);   // start live, not with stale audio
-        s_audio_left = 0;
+        s_rx_dead = false;
+        s_rx_sock = sock;
         int64_t since = esp_timer_get_time();
-        char ctl[64];
-        size_t ctl_len = 0;
-        while (true) {
-            read_control(sock, ctl, &ctl_len, sizeof(ctl));
+        while (!s_rx_dead) {
             // A new image proves itself by streaming, and with mics that really
             // hear something: a broken audio path would otherwise stream zeros.
             if (s_pending_verify && s_mic_alive && esp_timer_get_time() - since > STREAM_OK_S * 1000000LL) {
@@ -655,9 +805,14 @@ static void net_task(void *arg)
                 continue;
             }
             if (!send_all(sock, frame, got)) {
-                ESP_LOGW(TAG, "connection lost");
                 break;
             }
+        }
+        ESP_LOGW(TAG, "connection lost");
+        s_rx_sock = -1;
+        shutdown(sock, SHUT_RDWR);   // wakes the receive task
+        for (int i = 0; s_rx_busy && i < 100; i++) {
+            vTaskDelay(pdMS_TO_TICKS(20));
         }
         close(sock);
         strlcpy(s_state, "idle", sizeof(s_state));   // don't leave the ring lit
@@ -955,7 +1110,8 @@ void app_main(void)
     esp_codec_dev_handle_t mic = mic_start();
     if (s_spk) {
         s_play = xStreamBufferCreateWithCaps(PLAY_BYTES, 2, MALLOC_CAP_SPIRAM);
-        if (!s_play) {
+        s_music = xStreamBufferCreateWithCaps(MUSIC_BYTES, 2, MALLOC_CAP_SPIRAM);
+        if (!s_play || !s_music) {
             s_spk = NULL;
         }
     }
@@ -973,6 +1129,7 @@ void app_main(void)
     wifi_start();
     xTaskCreatePinnedToCore(mic_task, "mic", 4096, mic, 6, NULL, 1);
     xTaskCreatePinnedToCore(net_task, "net", 4096, NULL, 5, NULL, 0);
+    xTaskCreatePinnedToCore(rx_task, "rx", 4096, NULL, 5, NULL, 0);
     xTaskCreatePinnedToCore(ota_task, "ota", 6144, NULL, 3, &s_ota_task, 0);
     xTaskCreatePinnedToCore(ring_task, "ring", 4096, NULL, 2, NULL, 0);
     xTaskCreatePinnedToCore(event_task, "event", 4096, NULL, 3, &s_event_task, 0);
