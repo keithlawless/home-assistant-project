@@ -72,6 +72,12 @@ DEFAULTS: dict = {
         # satellite at all (0 of 6 tries).
         "afe_local_priority_db": 36.0,
         "afe_local_listen_db": 42.0,
+        # ...and the satellite's own level: with music on, kitchen speech
+        # reached it at +31..+36 dB margin, overlapping the couch, but the
+        # satellite heard it only at -49..-55 dBFS, against -35..-45 from the
+        # couch (2026-11-09). Fainter than this, it waits for the kitchen and,
+        # if the kitchen doesn't wake, takes the request from the kitchen mic.
+        "afe_faint_db": -48.0,
         # Keep a short clip of every wake and near miss, for tuning and
         # retraining (taco/voice/clips.py). Near misses are runs that peak at
         # or above near_miss without firing. Oldest clips go past max_clips.
