@@ -1,10 +1,15 @@
 /*
  * Taco mic satellite for the Waveshare ESP32-S3-AUDIO-Board.
  *
- * Streams the board's two mics (mixed to mono, 16 kHz s16) to taco-voice
- * over TCP, using the same protocol as satellite/taco_satellite.py:
- *   "TACO <name> <token>\n", then raw little-endian samples, forever.
- * Wake word, VAD and STT all run on the kitchen Pi.
+ * Streams the board's two mics to taco-voice over TCP (16 kHz s16), using
+ * the protocol of satellite/taco_satellite.py plus two handshake options:
+ *   "TACO <name> <token> afe=<on|off|failed> ch=<1|2>\n", then raw
+ *   little-endian samples, forever.
+ * With the speech front end off (ch=1) that's the two mics mixed to mono.
+ * With it on (ch=2) it's ESP-SR's AFE source separation (BSS): two
+ * channels, interleaved, each holding mostly one sound source (say, a
+ * speaker and the TV). taco-voice runs its wake word on both and takes the
+ * request from whichever fired. Wake word, VAD and STT all run on the Pi.
  *
  * Audio path: ES7210 ADC (I2C 0x40, all four inputs) -> I2S0 in 32-bit
  * stereo mode, which packs four 16-bit channels per frame (Waveshare's
@@ -24,6 +29,8 @@
  *   STATE <idle|listening|thinking|speaking> [here|elsewhere]   for the light
  *   MUTE on|off      the kiosk's "stop listening" (house-wide): send silence
  *   UPDATE           check for new firmware now
+ *   AFE on|off       switch the speech front end (kept in NVS; restarts,
+ *                    but never while a new image is still on trial)
  *
  * Firmware updates (ota task): at boot and every OTA_CHECK_S the board asks
  * taco-voice, on the same port, "TACO-OTA <name> <token> <version>". If the
@@ -61,6 +68,9 @@
 #include "esp_codec_dev.h"
 #include "esp_codec_dev_defaults.h"
 #include "es7210_adc.h"
+#include "esp_afe_sr_models.h"
+#include "esp_afe_config.h"
+#include "esp_psram.h"
 
 #include "secrets.h"
 
@@ -88,8 +98,12 @@ static const char *TAG = "taco-sat";
 // peak dBFS), to check the channel layout. 0 = off.
 #define LEVELS_EVERY_S 60
 #define FRAME_SAMPLES 1280                 // 80 ms, the frame size taco-voice uses
-#define FRAME_BYTES   (FRAME_SAMPLES * 2)  // mono s16
-#define STREAM_BYTES  (FRAME_BYTES * 8)    // ~0.6 s of slack for network hiccups
+#define FRAME_BYTES   (FRAME_SAMPLES * 2)  // one channel, s16
+#define OUT_CH_MAX    2                    // channels streamed with the front end on
+#define STREAM_BYTES  (FRAME_BYTES * OUT_CH_MAX * 8)   // ~0.6 s of slack for network hiccups
+// How the AFE lays out its multi-channel raw_data: 1 = interleaved (L R L R),
+// 0 = one channel after the other. Not documented; checked on the board.
+#define AFE_RAW_INTERLEAVED 1
 
 #define WIFI_UP BIT0
 
@@ -108,6 +122,16 @@ static i2c_master_bus_handle_t s_i2c;
 static char s_state[16] = "idle";
 static volatile bool s_here;              // this room has the current turn
 static TaskHandle_t s_ota_task;
+
+// The speech front end (ESP-SR AFE). s_afe_want is kept in NVS; the AFE
+// starts only at boot, so switching it means a restart.
+static bool s_afe_want;
+static volatile bool s_afe_restart;        // switched; restart once it's safe
+static const char *s_afe_status = "off";   // for the handshake: on, off, failed
+static int s_out_ch = 1;                   // channels in each streamed frame
+static const esp_afe_sr_iface_t *s_afe_if;
+static esp_afe_sr_data_t *s_afe;
+static int s_feed_chunk;                   // samples per channel per feed()
 
 static bool s_pending_verify;      // running a new image that hasn't proved itself
 static char s_bad_version[32];     // the image that last rolled back; never retaken
@@ -224,6 +248,100 @@ static esp_codec_dev_handle_t mic_start(void)
 // Per-channel levels for the LEVELS report.
 static char s_levels[96];
 
+// -- Speech front end -------------------------------------------------------------
+
+static bool afe_start(void)
+{
+    // The ES7210's four channels, in Waveshare's layout: R = speaker
+    // reference, M = mic, N = unused.
+    afe_config_t *cfg = afe_config_init("RMNM", NULL, AFE_TYPE_SR, AFE_MODE_LOW_COST);
+    if (!cfg) {
+        return false;
+    }
+    cfg->aec_init = false;       // nothing plays on this board yet
+    cfg->se_init = true;         // BSS: split the two mics into separate sources
+    cfg->ns_init = false;
+    cfg->vad_init = false;       // taco-voice does VAD,
+    cfg->wakenet_init = false;   // and the wake word
+    cfg->agc_init = false;       // kitchen priority compares raw levels
+    cfg->memory_alloc_mode = AFE_MEMORY_ALLOC_MORE_PSRAM;
+    cfg->afe_perferred_core = 1;
+    cfg->afe_perferred_priority = 5;
+    s_afe_if = esp_afe_handle_from_config(cfg);
+    s_afe = s_afe_if ? s_afe_if->create_from_config(cfg) : NULL;
+    afe_config_free(cfg);
+    if (!s_afe) {
+        return false;
+    }
+    s_feed_chunk = s_afe_if->get_feed_chunksize(s_afe);
+    ESP_LOGI(TAG, "speech front end on: feed %d x %d ch, fetch %d", s_feed_chunk,
+             s_afe_if->get_feed_channel_num(s_afe), s_afe_if->get_fetch_chunksize(s_afe));
+    s_afe_if->print_pipeline(s_afe);
+    return true;
+}
+
+// Feed one 80 ms frame of all four ADC channels to the AFE, in its chunk size.
+static void afe_feed(const int16_t *quad)
+{
+    static int16_t *buf;
+    static int fill;   // samples per channel in buf
+    if (!buf) {
+        buf = heap_caps_malloc(s_feed_chunk * ADC_CHANNELS * sizeof(int16_t), MALLOC_CAP_SPIRAM);
+    }
+    for (int i = 0; i < FRAME_SAMPLES;) {
+        int n = s_feed_chunk - fill < FRAME_SAMPLES - i ? s_feed_chunk - fill : FRAME_SAMPLES - i;
+        memcpy(&buf[fill * ADC_CHANNELS], &quad[i * ADC_CHANNELS], n * ADC_CHANNELS * sizeof(int16_t));
+        fill += n;
+        i += n;
+        if (fill == s_feed_chunk) {
+            s_afe_if->feed(s_afe, buf);
+            fill = 0;
+        }
+    }
+}
+
+// Collect the AFE's two separated channels into 80 ms interleaved frames.
+static void afe_task(void *arg)
+{
+    static int16_t out[FRAME_SAMPLES * OUT_CH_MAX];
+    int fill = 0;
+    bool told = false;
+    while (true) {
+        afe_fetch_result_t *res = s_afe_if->fetch(s_afe);
+        if (!res || res->ret_value == ESP_FAIL || !res->data) {
+            continue;
+        }
+        int n = res->data_size / sizeof(int16_t);
+        int ch = res->raw_data ? res->raw_data_channels : 0;
+        if (!told) {
+            ESP_LOGI(TAG, "front end output: %d samples, %d raw channels", n, ch);
+            told = true;
+        }
+        for (int i = 0; i < n; i++) {
+            int16_t a = res->data[i], b = a;
+            if (ch >= 2) {
+#if AFE_RAW_INTERLEAVED
+                a = res->raw_data[i * ch];
+                b = res->raw_data[i * ch + 1];
+#else
+                a = res->raw_data[i];
+                b = res->raw_data[n + i];
+#endif
+            }
+            out[2 * fill] = MUTED() ? 0 : a;
+            out[2 * fill + 1] = MUTED() ? 0 : b;
+            if (++fill == FRAME_SAMPLES) {
+                fill = 0;
+                if (xStreamBufferSpacesAvailable(s_audio) >= sizeof(out)) {
+                    xStreamBufferSend(s_audio, out, sizeof(out), 0);
+                }
+            }
+        }
+    }
+}
+
+// -- Mic task -----------------------------------------------------------------------
+
 static void mic_task(void *arg)
 {
     esp_codec_dev_handle_t mic = arg;
@@ -260,6 +378,10 @@ static void mic_task(void *arg)
             if (s_event_task) {
                 xTaskNotify(s_event_task, EVENT_LEVELS, eSetBits);
             }
+        }
+        if (s_afe) {
+            afe_feed(quad);   // the AFE task streams its output
+            continue;
         }
         // Never block: if the network is behind, drop this frame.
         if (xStreamBufferSpacesAvailable(s_audio) >= FRAME_BYTES) {
@@ -301,7 +423,8 @@ static int tcp_open(void)
 static int taco_connect(void)
 {
     int sock = tcp_open();
-    const char *hello = "TACO " SAT_NAME " " SAT_TOKEN "\n";
+    char hello[160];
+    snprintf(hello, sizeof(hello), "TACO %s %s afe=%s ch=%d\n", SAT_NAME, SAT_TOKEN, s_afe_status, s_out_ch);
     if (sock >= 0 && send(sock, hello, strlen(hello), 0) < 0) {
         close(sock);
         return -1;
@@ -322,6 +445,8 @@ static bool send_all(int sock, const uint8_t *buf, size_t len)
     return true;
 }
 
+static void save_settings(void);
+
 static void handle_line(char *line)
 {
     char word[16] = {0}, arg[16] = {0}, where[16] = {0};
@@ -338,6 +463,14 @@ static void handle_line(char *line)
             ESP_LOGI(TAG, "taco %s", muted ? "muted (stop listening)" : "listening again");
         }
         s_house_muted = muted;
+    } else if (strcmp(word, "AFE") == 0 && (strcmp(arg, "on") == 0 || strcmp(arg, "off") == 0)) {
+        bool on = strcmp(arg, "on") == 0;
+        if (on != s_afe_want) {
+            s_afe_want = on;
+            save_settings();
+            s_afe_restart = true;
+            ESP_LOGI(TAG, "speech front end %s; restarting", arg);
+        }
     } else if (strcmp(word, "UPDATE") == 0) {
         ESP_LOGI(TAG, "taco has new firmware");
         if (s_ota_task) {
@@ -365,7 +498,7 @@ static void read_control(int sock, char *line, size_t *len, size_t size)
 
 static void net_task(void *arg)
 {
-    static uint8_t frame[FRAME_BYTES];
+    static uint8_t frame[FRAME_BYTES * OUT_CH_MAX];
     int backoff_ms = 1000;
     while (true) {
         xEventGroupWaitBits(s_wifi, WIFI_UP, pdFALSE, pdTRUE, portMAX_DELAY);
@@ -389,7 +522,13 @@ static void net_task(void *arg)
                 s_pending_verify = false;
                 ESP_LOGI(TAG, "firmware %s confirmed", esp_app_get_description()->version);
             }
-            size_t got = xStreamBufferReceive(s_audio, frame, FRAME_BYTES, pdMS_TO_TICKS(1000));
+            if (s_afe_restart && !s_pending_verify) {
+                // Not while a new image is on trial: that restart would roll it back.
+                close(sock);
+                vTaskDelay(pdMS_TO_TICKS(200));
+                esp_restart();
+            }
+            size_t got = xStreamBufferReceive(s_audio, frame, FRAME_BYTES * s_out_ch, pdMS_TO_TICKS(1000));
             if (got == 0) {
                 continue;
             }
@@ -422,26 +561,29 @@ static bool recv_line(int sock, char *line, size_t size)
 
 // -- Light and mute button --------------------------------------------------------
 
-static void save_button_mute(void)
+static void save_settings(void)
 {
     nvs_handle_t nvs;
     if (nvs_open("taco", NVS_READWRITE, &nvs) == ESP_OK) {
         nvs_set_u8(nvs, "btn_mute", s_button_muted);
+        nvs_set_u8(nvs, "afe", s_afe_want);
         nvs_commit(nvs);
         nvs_close(nvs);
     }
 }
 
-static void load_button_mute(void)
+static void load_settings(void)
 {
     nvs_handle_t nvs;
-    uint8_t v = 0;
+    uint8_t mute = 0, afe = 0;
     if (nvs_open("taco", NVS_READONLY, &nvs) == ESP_OK) {
-        nvs_get_u8(nvs, "btn_mute", &v);
+        nvs_get_u8(nvs, "btn_mute", &mute);
+        nvs_get_u8(nvs, "afe", &afe);
         nvs_close(nvs);
     }
-    s_button_muted = v;
-    if (v) {
+    s_button_muted = mute;
+    s_afe_want = afe;
+    if (mute) {
         ESP_LOGI(TAG, "living-room mic muted by its button (press K2 to unmute)");
     }
 }
@@ -508,7 +650,7 @@ static void ring_task(void *arg)
                 same = 0;
                 if (down) {
                     s_button_muted = !s_button_muted;
-                    save_button_mute();
+                    save_settings();
                     ESP_LOGI(TAG, "mute button: living-room mic %s", s_button_muted ? "muted" : "on");
                     if (s_event_task) {
                         xTaskNotify(s_event_task, EVENT_MUTE, eSetBits);
@@ -679,9 +821,20 @@ void app_main(void)
     ESP_ERROR_CHECK(err);
 
     ota_boot_state();
-    load_button_mute();
+    load_settings();
     s_audio = xStreamBufferCreate(STREAM_BYTES, FRAME_BYTES);
     esp_codec_dev_handle_t mic = mic_start();
+    ESP_LOGI(TAG, "PSRAM %u KB", (unsigned)(esp_psram_is_initialized() ? esp_psram_get_size() / 1024 : 0));
+    if (s_afe_want) {
+        if (afe_start()) {
+            s_afe_status = "on";
+            s_out_ch = 2;
+            xTaskCreatePinnedToCore(afe_task, "afe", 8192, NULL, 5, NULL, 1);
+        } else {
+            s_afe_status = "failed";   // taco-voice won't ask again, so no restart loop
+            ESP_LOGE(TAG, "speech front end didn't start; streaming the mic mix");
+        }
+    }
     wifi_start();
     xTaskCreatePinnedToCore(mic_task, "mic", 4096, mic, 6, NULL, 1);
     xTaskCreatePinnedToCore(net_task, "net", 4096, NULL, 5, NULL, 0);
