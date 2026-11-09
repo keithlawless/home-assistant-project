@@ -196,7 +196,8 @@ class VoiceLoop:
         self.muted = False                 # "stop listening" privacy mode
         self.state = "idle"                # what the screen and satellites show
         self.announcer = Speaker(audio["output_device"])   # alerts, scheduled messages
-        self.alarm = AlarmPlayer(Speaker(audio["output_device"]), self.synthesize)
+        self._alarm_speaker = Speaker(audio["output_device"])
+        self.alarm = AlarmPlayer(self._room_speaker, self.synthesize)
         self.core = CoreLink(cfg["core"]["url"], self._on_core_message)
         tv = cfg["tv"]
         self.tv = (TvPauser(tv["apple_tv"], tv["rooms"], tv["marker"], tv["resume_within_s"], tv["pause_ad_after_s"])
@@ -524,6 +525,16 @@ class VoiceLoop:
             return SatelliteMix(sat)
         return mic
 
+    def _room_speaker(self, room: str | None):
+        """Where an alarm set in `room` rings: that room's satellite speaker
+        if it's connected and has one, else the kitchen."""
+        for sat, speaker in self._sat_speakers.items():
+            if sat.name == room and sat.connected and sat.speaker:
+                return speaker
+        if room and room != self.listeners[0][0].name:
+            log.debug("alarm for %r rings in the kitchen (no speaker there now)", room)
+        return self._alarm_speaker
+
     def _reply_speaker(self):
         """Where this turn's replies play: the satellite's own speaker for a
         turn taken there (if the board has one), else the kitchen speaker."""
@@ -578,7 +589,7 @@ class VoiceLoop:
                 return
             self.events.send("heard", text=text)
 
-            fast = self.core.intent(text)
+            fast = self.core.intent(text, _room(self.active[0]))
             if fast.get("handled"):
                 log.info("fast path (%.2fs): %r", time.monotonic() - t0, fast.get("speech"))
                 reply, barged = self.say(fast.get("speech") or "") if not fast.get("silent") else ("", False)

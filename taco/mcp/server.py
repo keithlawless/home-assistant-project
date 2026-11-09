@@ -66,7 +66,7 @@ def set_timer(hours: float = 0, minutes: float = 0, seconds: float = 0, label: s
     """Start a kitchen countdown timer. Give it a short label when the user names
     what it's for ("pasta", "eggs"). Call once per timer for several timers."""
     total = hours * 3600 + minutes * 60 + seconds
-    return _summary(_call("POST", "/api/timers", json={"seconds": total, "label": label}))
+    return _summary(_call("POST", "/api/timers", json={"seconds": total, "label": label, "room": "turn"}))
 
 
 @mcp.tool()
@@ -108,7 +108,7 @@ def add_time_to_timer(minutes: float = 0, seconds: float = 0, label: str | None 
 def set_alarm(time: str, label: str | None = None) -> dict:
     """Set an alarm for a clock time like "7:30 am", "19:15" or "6 pm tomorrow"
     (the next time it occurs)."""
-    return _summary(_call("POST", "/api/alarms", json={"time": time, "label": label}))
+    return _summary(_call("POST", "/api/alarms", json={"time": time, "label": label, "room": "turn"}))
 
 
 @mcp.tool()
@@ -116,7 +116,7 @@ def set_reminder(message: str, in_minutes: float | None = None, at_epoch_seconds
     """Have Taco speak a reminder later. Give either in_minutes, or an absolute
     time as Unix epoch seconds (local time zone is the household's). The message
     should read naturally after "Reminder:", e.g. "take the bread out"."""
-    body: dict[str, Any] = {"message": message}
+    body: dict[str, Any] = {"message": message, "room": "turn"}
     if at_epoch_seconds is not None:
         body["at"] = at_epoch_seconds
     else:

@@ -30,6 +30,7 @@ class Timer:
     message: str | None       # reminders: what to say
     created_at: float
     rang_at: float | None = None
+    room: str | None = None   # where it was set; it rings there (None: the kitchen)
 
     def remaining(self, now: float | None = None) -> float:
         if self.state == "paused":
@@ -66,6 +67,9 @@ class TimerStore:
                     created_at REAL NOT NULL,
                     rang_at REAL
                 )""")
+            cols = {r[1] for r in self._conn.execute("PRAGMA table_info(timers)")}
+            if "room" not in cols:
+                self._conn.execute("ALTER TABLE timers ADD COLUMN room TEXT")
             self._conn.commit()
 
     # -- queries -------------------------------------------------------------
@@ -74,7 +78,7 @@ class TimerStore:
         with self._lock:
             rows = self._conn.execute(
                 "SELECT id, kind, label, duration_s, ends_at, state, remaining_s, message, "
-                "created_at, rang_at FROM timers ORDER BY ends_at").fetchall()
+                "created_at, rang_at, room FROM timers ORDER BY ends_at").fetchall()
         timers = [Timer(*r) for r in rows]
         # Paused timers sort by what's left, not their stale ends_at.
         return sorted(timers, key=lambda t: t.remaining() if t.state == "paused" else t.ends_at - time.time())
@@ -101,26 +105,27 @@ class TimerStore:
     # -- changes -------------------------------------------------------------
 
     def _insert(self, kind: str, ends_at: float, label: str | None = None,
-                duration_s: float | None = None, message: str | None = None) -> Timer:
+                duration_s: float | None = None, message: str | None = None,
+                room: str | None = None) -> Timer:
         with self._lock:
             cur = self._conn.execute(
-                "INSERT INTO timers (kind, label, duration_s, ends_at, state, message, created_at) "
-                "VALUES (?, ?, ?, ?, 'running', ?, ?)",
-                (kind, label or None, duration_s, ends_at, message, time.time()))
+                "INSERT INTO timers (kind, label, duration_s, ends_at, state, message, created_at, room) "
+                "VALUES (?, ?, ?, ?, 'running', ?, ?, ?)",
+                (kind, label or None, duration_s, ends_at, message, time.time(), room or None))
             self._conn.commit()
             timer_id = cur.lastrowid
         return self.get(timer_id)  # type: ignore[return-value]
 
-    def add_timer(self, seconds: float, label: str | None = None) -> Timer:
+    def add_timer(self, seconds: float, label: str | None = None, room: str | None = None) -> Timer:
         if seconds <= 0:
             raise ValueError("timer length must be positive")
-        return self._insert("timer", time.time() + seconds, label, duration_s=seconds)
+        return self._insert("timer", time.time() + seconds, label, duration_s=seconds, room=room)
 
-    def add_alarm(self, at: float, label: str | None = None) -> Timer:
-        return self._insert("alarm", at, label)
+    def add_alarm(self, at: float, label: str | None = None, room: str | None = None) -> Timer:
+        return self._insert("alarm", at, label, room=room)
 
-    def add_reminder(self, at: float, message: str) -> Timer:
-        return self._insert("reminder", at, message=message)
+    def add_reminder(self, at: float, message: str, room: str | None = None) -> Timer:
+        return self._insert("reminder", at, message=message, room=room)
 
     def _update(self, timer_id: int, **fields: Any) -> None:
         cols = ", ".join(f"{k} = ?" for k in fields)
