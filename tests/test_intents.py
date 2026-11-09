@@ -257,3 +257,20 @@ def test_resume_music_but_not_timers():
     assert p("unpause it").name == "media_resume"
     assert p("resume the timer").name == "resume_timer"
     assert p("play Miles Davis").name == "media_play"   # no "Spotify": the NAS, then Spotify, then radio
+
+
+
+@pytest.mark.parametrize("text, slots", [
+    ("Plan my release radar.", {"query": "release radar", "playlist": True, "mine": True}),
+    ("I said play my release radar.", {"query": "release radar", "playlist": True, "mine": True}),
+    ("No, play my Discover Weekly", {"query": "discover weekly", "playlist": True, "mine": True}),
+    ("Place Miles Davis on Spotify", {"query": "miles davis"}),
+])
+def test_spotify_requests_survive_mishearing_and_repeats(text, slots):
+    i = p(text)
+    assert i.name == "spotify_play" and i.slots == slots
+
+
+def test_misheard_play_stays_narrow():
+    assert p("plan my day") is None or p("plan my day").name != "spotify_play"
+    assert p("plan a trip on saturday") is None or p("plan a trip on saturday").name != "spotify_play"
