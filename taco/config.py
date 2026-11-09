@@ -61,6 +61,13 @@ DEFAULTS: dict = {
         "local_priority_db": 10.0,
         "local_defer_s": 0.8,
         "local_listen_db": 15.0,
+        # The same two, for a satellite running its speech front end. Separation
+        # lowers the speaker's level on its channel, and the kitchen's EMEET
+        # gains up distant voices: couch speech with the TV on measured
+        # +19..+31 dB (2026-11-09), while kitchen speech didn't reach the
+        # satellite at all (0 of 6 tries).
+        "afe_local_priority_db": 36.0,
+        "afe_local_listen_db": 42.0,
         # Keep a short clip of every wake and near miss, for tuning and
         # retraining (taco/voice/clips.py). Near misses are runs that peak at
         # or above near_miss without firing. Oldest clips go past max_clips.

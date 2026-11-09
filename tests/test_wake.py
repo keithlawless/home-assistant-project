@@ -181,7 +181,8 @@ def _loop_with(local_level, satellite_level, limit=10.0, kitchen_scores=(0.0,)):
     from taco.voice.main import VoiceLoop
 
     loop = VoiceLoop.__new__(VoiceLoop)   # no models or devices
-    loop.cfg = {"wake": {"local_priority_db": limit, "local_defer_s": 0.8, "local_listen_db": 15.0}}
+    loop.cfg = {"wake": {"local_priority_db": limit, "local_defer_s": 0.8, "local_listen_db": 15.0,
+                        "afe_local_priority_db": 36.0, "afe_local_listen_db": 42.0}}
     loop.clips = None
     loop.muted = False
     loop._deferred = None
@@ -270,7 +271,8 @@ def test_satellite_channels_waiting_together_keep_the_stronger(caplog):
     from taco.voice.main import VoiceLoop
 
     loop = VoiceLoop.__new__(VoiceLoop)
-    loop.cfg = {"wake": {"local_priority_db": 10.0, "local_defer_s": 0.8, "local_listen_db": 15.0}}
+    loop.cfg = {"wake": {"local_priority_db": 10.0, "local_defer_s": 0.8, "local_listen_db": 15.0,
+                        "afe_local_priority_db": 36.0, "afe_local_listen_db": 42.0}}
     loop.clips = None
     loop.muted = False
     loop._deferred = None
@@ -284,3 +286,26 @@ def test_satellite_channels_waiting_together_keep_the_stronger(caplog):
     assert loop._deferred["listener"][0] is sat2 and loop._deferred["score"] == 0.9
     score, detector, listener = loop._detect_wake(now=1.0)
     assert score == 0.9 and detector[0] is sat2 and listener[0] is sat2
+
+
+def test_front_end_satellite_uses_its_own_margins():
+    """With the speech front end on, couch speech reads +19..+27 dB: it fires
+    at once on the satellite instead of going to the kitchen."""
+    loop, mic, satellite = _loop_with(6000, 300)   # ~26 dB
+    satellite.afe = "on"
+    score, detector, listener = loop._detect_wake(now=0.0)
+    assert detector[0] is satellite and listener[0] is satellite and loop._deferred is None
+
+
+def test_front_end_satellite_still_defers_far_louder_kitchen_speech():
+    loop, mic, satellite = _loop_with(24000, 300)  # ~38 dB: someone at the kitchen mic
+    satellite.afe = "on"
+    assert loop._detect_wake(now=0.0) is None      # waits for the kitchen
+    score, detector, listener = loop._detect_wake(now=1.0)
+    assert listener[0] is satellite                # 38 < 42: the satellite keeps it
+
+
+def test_front_end_satellite_fires_at_once_for_loud_couch_speech():
+    loop, mic, satellite = _loop_with(10500, 300)  # ~31 dB, the loudest couch reading
+    satellite.afe = "on"
+    assert loop._detect_wake(now=0.0)[2][0] is satellite

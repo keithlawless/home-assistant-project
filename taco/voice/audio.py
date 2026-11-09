@@ -125,6 +125,8 @@ class SatelliteChannel(_FrameSource):
     end's separated sources). It gets its own wake model, like any mic, so
     whichever channel holds the speaker's voice wins the wake."""
 
+    sample_rate = 16000   # fixed by the satellite protocol, as for NetworkMicrophone
+
     def __init__(self, parent: "NetworkMicrophone", ready: threading.Event | None = None):
         super().__init__(f"{parent.name} 2", ready)
         self.parent = parent
@@ -135,6 +137,32 @@ class SatelliteChannel(_FrameSource):
     @property
     def live(self) -> bool:
         return self.parent.connected and self.parent.channels == 2
+
+
+class SatelliteMix:
+    """Both channels of a two-channel satellite, added together: what a
+    request is recorded from. The front end can move the speaker to the
+    other channel mid-turn (for one, once the TV pauses), so the request
+    mustn't depend on which channel heard the wake word. Not a wake listener:
+    while a turn is on, the voice loop isn't reading the channels itself."""
+
+    sample_rate = 16000
+
+    def __init__(self, sat: "NetworkMicrophone"):
+        self.sat = sat
+        self.name = f"{sat.name} (both channels)"
+
+    def read(self, timeout: float | None = None) -> np.ndarray:
+        a = self.sat.read(timeout=timeout)
+        try:
+            b = self.sat.second.read(timeout=0.2)   # fed with a, frame for frame
+        except queue.Empty:
+            return a
+        return np.clip(a.astype(np.int32) + b, -32768, 32767).astype(np.int16)
+
+    def flush(self) -> None:
+        self.sat.flush()
+        self.sat.second.flush()
 
 
 class NetworkMicrophone(_FrameSource):

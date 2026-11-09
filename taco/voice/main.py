@@ -29,7 +29,7 @@ from taco.voices import DEFAULT_VOICE, PREVIEW_TEXT
 from .alarm import AlarmPlayer
 from .clips import ClipRecorder
 from .tv import TvPauser
-from .audio import Microphone, NetworkMicrophone, SatelliteChannel, Speaker, tone
+from .audio import Microphone, NetworkMicrophone, SatelliteChannel, SatelliteMix, Speaker, tone
 from .core_link import CoreLink
 from .hermes import HermesClient, asks_question
 from .listen import record_request
@@ -136,6 +136,11 @@ def _clip_tags(mic) -> dict:
     """Whether a satellite clip came through its speech front end."""
     sat = mic.parent if isinstance(mic, SatelliteChannel) else mic
     return {"afe": sat.afe} if isinstance(sat, NetworkMicrophone) and sat.afe else {}
+
+
+def _afe_on(mic) -> bool:
+    sat = mic.parent if isinstance(mic, SatelliteChannel) else mic
+    return getattr(sat, "afe", None) == "on"
 
 
 def _room(mic) -> str:
@@ -366,7 +371,9 @@ class VoiceLoop:
         """A satellite also hears speech in the kitchen, and shouldn't take
         the turn: hold its wake when the local mic heard that moment much
         louder ([wake] local_priority_db), to see if the local mic wakes too."""
-        limit = self.cfg["wake"]["local_priority_db"]
+        w = self.cfg["wake"]
+        afe = _afe_on(mic)
+        limit = w["afe_local_priority_db" if afe else "local_priority_db"]
         if mic is self.listeners[0][0] or not limit:
             return False
         margin = self._local_margin(wake)
@@ -382,7 +389,8 @@ class VoiceLoop:
         log.info("wake word (%.2f, %s) waits: %s heard it %.0f dB louder",
                  score, mic.name, self.listeners[0][0].name, margin)
         self._deferred = {"score": score, "listener": (mic, wake), "margin": margin,
-                          "until": now + self.cfg["wake"]["local_defer_s"]}
+                          "until": now + w["local_defer_s"],
+                          "listen_db": w["afe_local_listen_db" if afe else "local_listen_db"]}
         return True
 
     def _drop_deferred(self) -> None:
@@ -408,7 +416,7 @@ class VoiceLoop:
         mic when it heard the speaker far louder ([wake] local_listen_db)."""
         d, self._deferred = self._deferred, None
         listener = d["listener"]
-        if d["margin"] >= self.cfg["wake"]["local_listen_db"]:
+        if d["margin"] >= d["listen_db"]:
             listener = self.listeners[0]
         return d["score"], d["listener"], listener
 
@@ -489,6 +497,15 @@ class VoiceLoop:
         for mic, _ in self.listeners:
             mic.flush()
 
+    def _request_source(self):
+        """Where to record the request: the turn's mic, or for a satellite
+        streaming two separated channels, both of them added together."""
+        mic = self.active[0]
+        sat = mic.parent if isinstance(mic, SatelliteChannel) else mic
+        if isinstance(sat, NetworkMicrophone) and sat.channels == 2:
+            return SatelliteMix(sat)
+        return mic
+
     def converse(self) -> None:
         """One wake: a request, plus follow-ups while Taco keeps asking questions
         or keeps being interrupted."""
@@ -499,7 +516,7 @@ class VoiceLoop:
             self._play_and_wait(WAKE_CHIME, 22050)
             self._set_state("listening")
             audio = record_request(
-                self.active[0],
+                self._request_source(),
                 start_timeout_s=start_timeout,
                 end_silence_s=self.cfg["listen"]["end_silence_s"],
                 max_seconds=self.cfg["listen"]["max_seconds"],

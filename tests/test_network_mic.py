@@ -350,3 +350,27 @@ def test_afe_never_asked_of_old_or_failed_boards(tmp_path, reported):
     mic.afe = reported
     mic.check_afe()
     assert sent_lines(mic) == []          # no restart loop
+
+
+def test_record_request_from_second_channel():
+    # The request comes from whichever channel fired; this crashed taco-voice once.
+    from taco.voice.listen import record_request
+    mic = start_mic()
+    both = np.zeros(FRAME_SAMPLES * 2 * 4, dtype=np.int16)
+    with connect_with(mic, "afe=on ch=2") as sock:
+        sock.sendall(both.tobytes())
+        assert mic.second.sample_rate == 16000
+        assert record_request(mic.second, start_timeout_s=0.1, end_silence_s=0.5, max_seconds=2) is None
+
+
+def test_request_mix_adds_both_channels():
+    from taco.voice.audio import SatelliteMix
+    mic = start_mic()
+    a = np.full(FRAME_SAMPLES, 100, dtype=np.int16)
+    b = np.full(FRAME_SAMPLES, 30000, dtype=np.int16)
+    both = np.empty(FRAME_SAMPLES * 2, dtype=np.int16)
+    both[0::2], both[1::2] = a, b
+    with connect_with(mic, "afe=on ch=2") as sock:
+        sock.sendall(both.tobytes())
+        mixed = SatelliteMix(mic).read(timeout=2)
+        assert mixed.dtype == np.int16 and int(mixed[0]) == 30100
