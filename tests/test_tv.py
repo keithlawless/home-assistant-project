@@ -93,3 +93,19 @@ def test_marker_age_decides_resume_after_restart(tmp_path):
     assert p._marker_age() < p.resume_within_s
     marker.write_text(json.dumps({"paused_at": time.time() - 3600}))
     assert p._marker_age() > p.resume_within_s
+
+
+def test_resume_waits_out_idle_right_after_connecting(tmp_path):
+    atv = FakeAtv("Playing")
+    p = pauser(tmp_path, atv)
+    run(p, p._pause())
+    states = iter(["Idle", "Idle", "Paused"])      # a fresh connection's first answers
+    real = atv._playing
+
+    async def playing():
+        r = await real()
+        r.device_state.name = next(states, "Paused")
+        return r
+    atv.metadata.playing = playing
+    run(p, p._resume())
+    assert atv.calls == ["pause", "play"]

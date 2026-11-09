@@ -108,8 +108,15 @@ class TvPauser:
             return None
         return self._atv
 
-    async def _state(self, atv) -> str:
-        return (await atv.metadata.playing()).device_state.name   # Playing, Paused, Idle...
+    async def _state(self, atv, settle_s: float = 0.0) -> str:
+        """Playing, Paused, Idle... Right after connecting, the Apple TV can
+        say Idle until its first update arrives; settle_s waits that out."""
+        end = time.monotonic() + settle_s
+        while True:
+            state = (await atv.metadata.playing()).device_state.name
+            if state not in ("Idle", "Loading") or time.monotonic() >= end:
+                return state
+            await asyncio.sleep(0.25)
 
     async def _pause(self) -> None:
         if self._paused_by_us:
@@ -136,9 +143,12 @@ class TvPauser:
             return   # resumed after reconnecting (see _run), if still recent
         try:
             # Someone may have pressed play, or stopped it, meanwhile.
-            if await self._state(atv) == "Paused":
+            state = await self._state(atv, settle_s=5.0)
+            if state == "Paused":
                 await atv.remote_control.play()
                 log.info("apple tv %s: resumed", self.host)
+            else:
+                log.info("apple tv %s: not resuming, it's %s now", self.host, state)
         except Exception as e:
             log.info("apple tv %s: resume failed: %s", self.host, e)
             return

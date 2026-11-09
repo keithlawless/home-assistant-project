@@ -125,6 +125,8 @@ class SatelliteChannel(_FrameSource):
     end's separated sources). It gets its own wake model, like any mic, so
     whichever channel holds the speaker's voice wins the wake."""
 
+    sample_rate = 16000   # fixed by the satellite protocol, as for NetworkMicrophone
+
     def __init__(self, parent: "NetworkMicrophone", ready: threading.Event | None = None):
         super().__init__(f"{parent.name} 2", ready)
         self.parent = parent
