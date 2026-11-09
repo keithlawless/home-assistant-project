@@ -8,9 +8,11 @@ Wants=pipewire.service
 # deploy/install-user.sh (no system install needed). Audio goes through pw-play
 # to the taco_music sink (deploy/pipewire/), which taco-core can point at a
 # Bluetooth speaker, tagged so taco-core can turn it down while Taco is talking.
+# Its own volume is fixed at 100% (--volume-ctrl fixed): Taco's speaker volume
+# is the one control. With librespot's default log curve, 69% was about -18 dB.
 ExecStart=%h/.local/bin/librespot \
     --name Taco --device-type speaker --bitrate 320 \
-    --initial-volume 70 --enable-volume-normalisation \
+    --initial-volume 100 --volume-ctrl fixed --enable-volume-normalisation \
     --cache %h/.cache/librespot \
     --backend subprocess \
     --device "pw-play --raw --rate 44100 --channels 2 --format s16 --target taco_music -P {application.name=TacoSpotify,state.restore-props=false} -" \
