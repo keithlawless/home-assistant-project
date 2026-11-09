@@ -42,7 +42,7 @@ from .notifications import NotificationStore, in_window
 from .oauth import OAuthError
 from .scenes import SceneStore, scene_key
 from .scheduler import Scheduler, ScheduleStore, describe
-from .speakers import KITCHEN, Speakers, resolve
+from .speakers import KITCHEN, KITCHEN_ROOM, Speakers, resolve, resolve_rooms
 from .spotify import Playable, SpotifyClient, SpotifyError
 from .stations import Reading, make_station
 from .weather import apply_station, fetch_forecast, geocode, locate_by_ip
@@ -95,8 +95,12 @@ class State:
         self.spotify_api = (SpotifyClient(sp, self.http, TACO_HOME / "data" / "oauth", restart_player=self.spotify.stop)
                             if sp["client_id"] and sp["client_secret"] and sp["refresh_token"] else None)
         self.library = Library(self.cfg["music"])
+        sats = self.cfg["audio"]["satellites"]
         self.speakers = Speakers(self.cfg["speakers"]["idle_revert_min"] * 60,
-                                 music_playing=lambda: self.music_playing, on_change=self.broadcast_media)
+                                 music_playing=lambda: self.music_playing, on_change=self.on_speakers_changed,
+                                 satellite_rooms=[s["name"] for s in sats])
+        # Each satellite's speaker volume (0-100), for "turn it up" in that room.
+        self.room_volumes: dict[str, int] = {s["name"]: int(s.get("volume", 70)) for s in sats}
         self.recipe: dict[str, Any] | None = None
         self.cleaning_until = 0.0   # wall clock; the touchscreen ignores taps until then
         self.alerts: list[dict[str, Any]] = []
@@ -118,7 +122,25 @@ class State:
         status = self.media.status() or self.spotify.status()
         if status and self.speakers.current:
             status = {**status, "speaker": self.speakers.current.name}
+        if status:
+            status = {**status, "rooms": [r for r in self.speakers.all_rooms if r in self.speakers.rooms]}
         return status
+
+    def room(self, name: str | None) -> str:
+        """A request's room as a music room: the local mic's name is the kitchen."""
+        return KITCHEN_ROOM if not name or name == self.cfg["audio"]["input_name"] else name
+
+    def music_route(self) -> dict[str, Any]:
+        """For taco-voice: the satellites to feed music to, and their volumes."""
+        return {"type": "music_route", "rooms": self.speakers.satellite_rooms, "volumes": self.room_volumes}
+
+    async def set_room_volume(self, room: str, level: int) -> None:
+        self.room_volumes[room] = max(0, min(100, level))
+        await self.hub.broadcast(self.music_route())
+
+    async def on_speakers_changed(self) -> None:
+        await self.broadcast_media()
+        await self.hub.broadcast(self.music_route())
 
     @property
     def music_playing(self) -> bool:
@@ -364,7 +386,7 @@ class State:
                 "timers": self.timers_payload(), "devices": self.devices.payload(),
                 "found": self.devices.found_payload(), "lists": self.lists_payload(),
                 "scenes": self.scenes.all(), "schedules": self.schedules_payload(), "alerts": self.alerts,
-                "media": self.media_status(), "recipe": self.recipe,
+                "media": self.media_status(), "recipe": self.recipe, "music_route": self.music_route(),
                 "cleaning": self.cleaning_left(),
                 "notifications": self.notifications.active(),
                 "events": self.events_on(datetime.now().date())}
@@ -982,9 +1004,17 @@ async def spotify_event(event: dict[str, Any]) -> dict[str, bool]:
     return {"ok": True}
 
 
+async def _route_music(body: dict[str, Any]) -> None:
+    """Hermes's play tools send room "turn": music follows the request to
+    its room, as on the fast path. The touchscreen sends none: no change."""
+    if room := _room(body):
+        await state.speakers.set_rooms({state.room(room)})
+
+
 @app.post("/api/media/play")
 async def play_media(body: dict[str, Any]) -> dict[str, Any]:
     """body: {"query": "WBUR" | "jazz"} or {"name", "url"} of a station."""
+    await _route_music(body)
     try:
         if body.get("url"):
             station = {"name": body.get("name") or "Radio", "url": body["url"]}
@@ -1020,6 +1050,7 @@ async def music_play(body: dict[str, Any]) -> dict[str, Any]:
     in order, a title as one song."""
     artist, album, title = body.get("artist"), body.get("album"), body.get("title")
     lib = state.library
+    await _route_music(body)
     if title:
         plan = await asyncio.to_thread(lib.resolve, title, artist, None)
     elif album:
@@ -1084,6 +1115,7 @@ async def spotify_play(body: dict[str, Any]) -> dict[str, Any]:
         thing = await api.resolve(body.get("query") or "", body.get("by"), body.get("kind"))
         if thing is None:
             raise HTTPException(404, "nothing on Spotify matched")
+    await _route_music(body)
     try:
         await state.play_spotify(thing)
     except SpotifyError as e:
@@ -1113,13 +1145,24 @@ async def spotify_control(body: dict[str, Any]) -> dict[str, Any]:
 async def list_speakers() -> dict[str, Any]:
     found = await state.speakers.list()
     current = state.speakers.current
+    sp = state.speakers
     return {"speakers": [KITCHEN.name, *[s.name for s in found]],
-            "current": current.name if current else KITCHEN.name}
+            "current": current.name if current else KITCHEN.name,
+            "rooms": sp.all_rooms, "music_rooms": [r for r in sp.all_rooms if r in sp.rooms]}
 
 
 @app.post("/api/speakers/select")
 async def select_speaker(body: dict[str, Any]) -> dict[str, Any]:
-    """body: {"name": "Sonos"}; a null name means the kitchen speaker."""
+    """body: {"name": "Sonos" | "bedroom" | "everywhere" | "here"}; a null
+    name means the kitchen speaker. With room "turn", "here" is the room of
+    the voice request being answered."""
+    if body.get("name"):
+        here = state.room(_room(body))
+        if (rooms := resolve_rooms(body["name"], here, state.speakers.all_rooms)) is not None:
+            if KITCHEN_ROOM in rooms and state.speakers.current:
+                await state.speakers.back("asked")
+            await state.speakers.set_rooms(rooms)
+            return {"rooms": [r for r in state.speakers.all_rooms if r in rooms]}
     found = await state.speakers.list()
     chosen = resolve(body.get("name"), found)
     if chosen is None:
@@ -1196,8 +1239,10 @@ async def voice_event(event: dict[str, Any]) -> dict[str, bool]:
     """State updates from taco-voice: listening, heard text, tool use, reply."""
     if event.get("type") == "state":
         state.voice = {"state": event.get("state", "idle")}
-        # Turn music down while Taco is listening or talking.
-        ducked = state.voice["state"] != "idle"
+        # Turn music down while Taco is listening or talking, in a room
+        # where it's playing (a bedroom request leaves the kitchen's alone).
+        room = state.room(event.get("room"))
+        ducked = state.voice["state"] != "idle" and (not event.get("room") or room in state.speakers.rooms)
         await state.media.duck(ducked)
         if state.spotify.playing:
             await state.spotify.duck(ducked)

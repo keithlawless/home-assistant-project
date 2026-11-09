@@ -1,9 +1,16 @@
-"""Bluetooth speakers for music ("play on Sonos", "list speakers").
+"""Where music plays: rooms ("play jazz in the bedroom", "play music
+everywhere") and Bluetooth speakers ("play on Sonos", "list speakers").
 
 Radio and Spotify play into the taco_music loopback sink
 (deploy/pipewire/60-taco-music.conf). Its output normally follows the default
 sink, the kitchen speaker. Choosing a Bluetooth speaker connects it and points
 the loopback's output at it; Taco's own voice stays in the kitchen.
+
+Rooms: "kitchen" is that local output (the kitchen speaker, or the Bluetooth
+speaker standing in for it); every other room is a satellite with a speaker,
+which taco-voice feeds from the taco_music monitor while the room is in
+`rooms`. Leaving the kitchen out mutes the loopback's output, not its input,
+so the satellites still get the music.
 
 The choice is temporary. Music goes back to the kitchen when asked, after
 idle_revert_s with no music playing, when the speaker drops off, or when
@@ -29,6 +36,10 @@ LOOPBACK_OUT = "taco_music.out"
 CHECK_S = 30
 _GENERIC = {"the", "my", "a", "speaker", "speakers", "bluetooth", "on", "to", "in", "through", "over"}
 _KITCHEN_WORDS = {"here", "kitchen", "back", "home", "this"}
+KITCHEN_ROOM = "kitchen"
+_HERE_WORDS = {"here", "back", "home", "this", "room", "in"}
+_EVERYWHERE = re.compile(r"(?:in )?(?:everywhere|every (?:room|speaker)|all (?:the )?(?:rooms|speakers)"
+                         r"|(?:all over |throughout )?the (?:whole )?house|the whole house|whole house)")
 
 
 @dataclass(frozen=True)
@@ -82,20 +93,79 @@ def resolve(spoken: str | None, speakers: list[Speaker]) -> Speaker | None:
     return None
 
 
+def resolve_rooms(spoken: str | None, here: str, rooms: list[str]) -> set[str] | None:
+    """Which rooms a spoken place means, or None if it isn't one (it may be a
+    Bluetooth speaker). None or "here" is the room the request came from;
+    "everywhere" is every room; "the kitchen and the bedroom" is both."""
+    text = normalize(spoken or "")
+    if not text:
+        return {here}
+    if _EVERYWHERE.fullmatch(text):
+        return set(rooms)
+    out: set[str] = set()
+    for part in re.split(r"\s+(?:and|plus)\s+|\s*,\s*", text):
+        words = [w for w in part.split() if w not in _GENERIC]
+        if not words or set(words) <= _HERE_WORDS:
+            out.add(here)
+            continue
+        phrase = " ".join(words)
+        match = next((r for r in rooms if normalize(r) == phrase), None)
+        if match is None:
+            return None
+        out.add(match)
+    return out
+
+
+def describe_rooms(rooms: set[str], here: str, all_rooms: list[str]) -> str:
+    """How to say where music plays: "here", "in the bedroom", "everywhere"."""
+    if rooms == {here}:
+        return "here"
+    if len(all_rooms) > 1 and rooms >= set(all_rooms):
+        return "everywhere"
+    order = {r: i for i, r in enumerate(all_rooms)}
+    names = [f"the {r}" for r in sorted(rooms, key=lambda r: (order.get(r, len(order)), r))]
+    return "in " + (names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1])
+
+
 def _sink_prefix(mac: str) -> str:
     return f"bluez_output.{mac.replace(':', '_')}"
 
 
 class Speakers:
     def __init__(self, idle_revert_s: float, music_playing: Callable[[], bool],
-                 on_change: Callable[[], Awaitable[None]], clock: Callable[[], float] = time.monotonic):
+                 on_change: Callable[[], Awaitable[None]], clock: Callable[[], float] = time.monotonic,
+                 satellite_rooms: list[str] | None = None):
         self.idle_revert_s = idle_revert_s
         self._music_playing = music_playing
         self._on_change = on_change
         self._clock = clock
         self.current: Speaker | None = None   # None = the kitchen speaker
+        # The rooms music plays in: the kitchen (the local output) and satellites.
+        self.all_rooms = [KITCHEN_ROOM, *(satellite_rooms or [])]
+        self.rooms: set[str] = {KITCHEN_ROOM}
+        self._kitchen_muted = False
         self._idle_since: float | None = None
         self._lock = asyncio.Lock()
+
+    @property
+    def satellite_rooms(self) -> list[str]:
+        """The satellites music plays on now (taco-voice feeds them)."""
+        return [r for r in self.all_rooms if r in self.rooms and r != KITCHEN_ROOM]
+
+    async def set_rooms(self, rooms: set[str]) -> None:
+        """Play music in these rooms. Without the kitchen, a Bluetooth speaker
+        standing in for it is let go too."""
+        rooms = {r for r in rooms if r in self.all_rooms} or {KITCHEN_ROOM}
+        if KITCHEN_ROOM not in rooms and self.current:
+            await self.back("music moved to another room", notify=False)
+        async with self._lock:
+            changed = rooms != self.rooms
+            self.rooms = rooms
+            self._idle_since = None
+            await self._mute_kitchen(KITCHEN_ROOM not in rooms)
+        if changed:
+            log.info("music plays in %s", ", ".join(sorted(rooms)))
+            await self._on_change()
 
     async def list(self) -> list[Speaker]:
         """Paired Bluetooth audio speakers (not including the kitchen speaker)."""
@@ -124,6 +194,8 @@ class Speakers:
                 return False
             await run("pw-metadata", str(node[0]), "target.object", sink, timeout=5)
             previous, self.current = self.current, speaker
+            self.rooms = {KITCHEN_ROOM}   # it stands in for the kitchen speaker
+            await self._mute_kitchen(False)
             self._idle_since = None
             log.info("music now plays on %s (%s)", speaker.name, sink)
             if previous:
@@ -131,7 +203,7 @@ class Speakers:
         await self._on_change()
         return True
 
-    async def back(self, reason: str) -> None:
+    async def back(self, reason: str, notify: bool = True) -> None:
         """Music back to the kitchen speaker; let the Bluetooth speaker go."""
         async with self._lock:
             previous, self.current = self.current, None
@@ -139,13 +211,15 @@ class Speakers:
             if previous:
                 log.info("music back on the kitchen speaker (%s)", reason)
                 await run("bluetoothctl", "disconnect", previous.mac, timeout=10)
-        if previous:
+        if previous and notify:
             await self._on_change()
 
     async def reset(self) -> None:
         """At startup: WirePlumber may have restored a Bluetooth target, and a
         speaker left connected stays on its Bluetooth input."""
         await self._clear_target()
+        self.rooms = {KITCHEN_ROOM}
+        await self._mute_kitchen(False, force=True)
         for speaker in await self.list():
             if speaker.connected:
                 log.info("disconnecting %s left over from before the restart", speaker.name)
@@ -160,9 +234,9 @@ class Speakers:
 
     async def check(self) -> None:
         """Switch back if the speaker dropped off or music has been off a while."""
-        if not self.current:
+        if not self.current and self.rooms == {KITCHEN_ROOM}:
             return
-        if await self._sink_node(self.current.mac) is None:
+        if self.current and await self._sink_node(self.current.mac) is None:
             await self.back(f"{self.current.name} disconnected")
             return
         if self._music_playing():
@@ -171,7 +245,12 @@ class Speakers:
         if self._idle_since is None:
             self._idle_since = self._clock()
         elif self._clock() - self._idle_since >= self.idle_revert_s:
-            await self.back(f"no music for {self.idle_revert_s / 60:.0f} min")
+            reason = f"no music for {self.idle_revert_s / 60:.0f} min"
+            if self.current:
+                await self.back(reason)
+            if self.rooms != {KITCHEN_ROOM}:
+                log.info("music rooms back to the kitchen (%s)", reason)
+                await self.set_rooms({KITCHEN_ROOM})
 
     async def watch(self) -> None:
         while True:
@@ -215,6 +294,15 @@ class Speakers:
         prefix = _sink_prefix(mac)
         return await find_node(lambda p: p.get("media.class") == "Audio/Sink"
                                and p.get("node.name", "").startswith(prefix))
+
+    async def _mute_kitchen(self, muted: bool, force: bool = False) -> None:
+        """Silence the loopback's output (the kitchen, or a Bluetooth speaker
+        standing in for it), keeping its input for the satellites."""
+        if muted == self._kitchen_muted and not force:
+            return
+        if node := await find_node(lambda p: p.get("node.name") == LOOPBACK_OUT):
+            await run("wpctl", "set-mute", str(node[0]), "1" if muted else "0", timeout=5)
+            self._kitchen_muted = muted
 
     async def _clear_target(self) -> None:
         if node := await find_node(lambda p: p.get("node.name") == LOOPBACK_OUT):

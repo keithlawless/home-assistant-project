@@ -6,6 +6,8 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
+from taco.core.speakers import Speaker
+
 from taco.core.spotify import SEARCH_LIMIT, Playable, SpotifyClient, SpotifyError
 
 CFG = {"client_id": "cid", "client_secret": "secret", "refresh_token": "seed", "device_name": "Taco"}
@@ -161,6 +163,33 @@ class FakeApi:
         return False
 
 
+class FakeSpeakers:
+    """The parts of taco.core.speakers.Speakers the assistant uses."""
+
+    def __init__(self, found=(), rooms=("kitchen", "bedroom")):
+        self.found = list(found)
+        self.all_rooms = list(rooms)
+        self.rooms = {"kitchen"}
+        self.current = None
+        self.calls = []
+
+    async def list(self):
+        return self.found
+
+    async def select(self, sp):
+        self.calls.append(("speaker", sp.name))
+        self.current = sp
+        return True
+
+    async def back(self, reason, notify=True):
+        self.calls.append(("back",))
+        self.current = None
+
+    async def set_rooms(self, rooms):
+        self.calls.append(("rooms", sorted(rooms)))
+        self.rooms = set(rooms)
+
+
 def _assistant(library_hit: bool, spotify_thing, monkeypatch):
     from taco.core import assistant as mod
 
@@ -183,7 +212,8 @@ def _assistant(library_hit: bool, spotify_thing, monkeypatch):
     monkeypatch.setattr(mod, "search_stations", stations)
     state = SimpleNamespace(library=library, spotify_api=FakeApi(spotify_thing), play_library=play_library,
                             play_spotify=play_spotify, play_station=play_station, http=None,
-                            media=SimpleNamespace(station=None))
+                            media=SimpleNamespace(station=None), speakers=FakeSpeakers(),
+                            room=lambda name: name or "kitchen")
     return mod.Assistant(state), played, state
 
 
@@ -205,15 +235,9 @@ def test_source_order(monkeypatch, library_hit, spotify, radio, expect):
 def _assistant_for_empty_play(playing: bool, last: str, monkeypatch):
     from taco.core import assistant as mod
 
-    calls = []
-    sonos = SimpleNamespace(name="Sonos Move", is_kitchen=False)
-
-    async def speakers_list():
-        return [sonos]
-
-    async def select(sp):
-        calls.append(("speaker", sp.name))
-        return True
+    sonos = Speaker("Sonos Move", "AA:BB:CC:DD:EE:01")
+    speakers = FakeSpeakers([sonos])
+    calls = speakers.calls
 
     async def resume():
         calls.append(("resume",))
@@ -222,12 +246,11 @@ def _assistant_for_empty_play(playing: bool, last: str, monkeypatch):
     async def play_station(st):
         calls.append(("radio", st))
 
-    monkeypatch.setattr(mod, "resolve_speaker", lambda name, found: sonos)
     state = SimpleNamespace(
         music_playing=playing, last_source=last, spotify=SimpleNamespace(track={"name": "x"}),
-        spotify_api=object(), resume_music=resume, play_station=play_station,
-        speakers=SimpleNamespace(list=speakers_list, select=select),
-        media=SimpleNamespace(station={"name": "Cheap Trick"}), library=SimpleNamespace(ready=True))
+        spotify_api=object(), resume_music=resume, play_station=play_station, speakers=speakers,
+        media=SimpleNamespace(station={"name": "Cheap Trick"}), library=SimpleNamespace(ready=True),
+        room=lambda name: name or "kitchen")
     return mod.Assistant(state), calls
 
 
@@ -235,6 +258,56 @@ def test_play_music_on_a_speaker_moves_what_is_playing(monkeypatch):
     a, calls = _assistant_for_empty_play(playing=True, last="spotify", monkeypatch=monkeypatch)
     r = asyncio.run(a._do_media_play("", speaker="sonos"))
     assert calls == [("speaker", "Sonos Move")] and r["speech"] == "Moved the music to Sonos Move."
+
+
+def _room_request(a, room):
+    a.room = room
+    return a
+
+
+def test_play_in_a_room_plays_only_there(monkeypatch):
+    a, played, state = _assistant(True, None, monkeypatch)
+    r = asyncio.run(a._do_media_play("jazz in the bedroom"))
+    assert state.speakers.calls == [("rooms", ["bedroom"])] and r["speech"] == "Playing Lib in the bedroom."
+
+
+def test_music_follows_the_request(monkeypatch):
+    """Asked for in the bedroom, music plays in the bedroom, not the kitchen."""
+    a, played, state = _assistant(True, None, monkeypatch)
+    r = asyncio.run(_room_request(a, "bedroom")._do_media_play("jazz"))
+    assert state.speakers.calls == [("rooms", ["bedroom"])] and r["speech"] == "Playing Lib."
+
+
+def test_play_music_everywhere(monkeypatch):
+    a, calls = _assistant_for_empty_play(playing=True, last="media", monkeypatch=monkeypatch)
+    r = asyncio.run(a._do_media_play("music everywhere"))
+    assert calls == [("rooms", ["bedroom", "kitchen"])] and r["speech"] == "Moved the music everywhere."
+
+
+def test_play_music_where_it_already_plays(monkeypatch):
+    a, calls = _assistant_for_empty_play(playing=True, last="media", monkeypatch=monkeypatch)
+    r = asyncio.run(a._do_media_play(""))
+    assert calls == [] and r["speech"] == "It's already playing."
+    r = asyncio.run(_room_request(a, "bedroom")._do_media_play(""))
+    assert calls == [("rooms", ["bedroom"])] and r["speech"] == "Moved the music here."
+
+
+def test_kitchen_request_keeps_a_bluetooth_stand_in(monkeypatch):
+    """A Sonos playing for the kitchen stays on for "play jazz" in the kitchen,
+    but "play it in the kitchen" brings music back to the kitchen speaker."""
+    a, played, state = _assistant(True, None, monkeypatch)
+    state.speakers.current = Speaker("Sonos Move", "AA:BB:CC:DD:EE:01")
+    asyncio.run(a._do_media_play("jazz"))
+    assert state.speakers.calls == [("rooms", ["kitchen"])] and state.speakers.current
+    asyncio.run(a._do_media_play("jazz in the kitchen"))
+    assert ("back",) in state.speakers.calls and state.speakers.current is None
+
+
+def test_a_song_title_with_in_is_not_a_room(monkeypatch):
+    a, played, state = _assistant(True, None, monkeypatch)
+    assert a._split_place("singing in the rain") == ("singing in the rain", None)
+    assert a._split_place("music in here") == ("", "in here")
+    assert a._split_place("jazz in the kitchen and the bedroom") == ("jazz", "in the kitchen and the bedroom")
 
 
 def test_play_music_resumes_spotify_if_it_played_last(monkeypatch):
