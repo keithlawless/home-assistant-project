@@ -398,6 +398,25 @@ class Assistant:
             """Move to the requested speaker, only once there's something to play."""
             return chosen is None or await self.state.speakers.select(chosen)
 
+        if not query and not by and not radio:
+            # "Play music (on the Sonos)": keep what's playing, or resume what
+            # played last; never swap Spotify for the last radio or NAS request.
+            if self.state.music_playing:
+                if chosen is None:
+                    return _reply("It's already playing.")
+                if not await switch():
+                    return _reply(self._unreachable(chosen))
+                return _reply(f"Moved the music to {chosen.name}." if where else "Moved the music back here.")
+            if self.state.last_source == "spotify" and self.state.spotify.track and self.state.spotify_api:
+                if not await switch():
+                    return _reply(self._unreachable(chosen))
+                try:
+                    await self.state.resume_music()
+                except (SpotifyError, httpx.HTTPError, OAuthError) as e:
+                    log.warning("spotify resume failed: %s", e)
+                    return _reply("Sorry, I couldn't resume Spotify.")
+                return _reply(f"Resuming Spotify{where}.")
+
         library = self.state.library
         if (pick or year) and not library.ready:
             return {"handled": False}

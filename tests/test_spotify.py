@@ -196,3 +196,45 @@ def test_source_order(monkeypatch, library_hit, spotify, radio, expect):
     assert played and played[0][0] == expect
     if radio:
         assert state.spotify_api.asked == []
+
+
+
+def _assistant_for_empty_play(playing: bool, last: str, monkeypatch):
+    from taco.core import assistant as mod
+
+    calls = []
+    sonos = SimpleNamespace(name="Sonos Move", is_kitchen=False)
+
+    async def speakers_list():
+        return [sonos]
+
+    async def select(sp):
+        calls.append(("speaker", sp.name))
+        return True
+
+    async def resume():
+        calls.append(("resume",))
+        return True
+
+    async def play_station(st):
+        calls.append(("radio", st))
+
+    monkeypatch.setattr(mod, "resolve_speaker", lambda name, found: sonos)
+    state = SimpleNamespace(
+        music_playing=playing, last_source=last, spotify=SimpleNamespace(track={"name": "x"}),
+        spotify_api=object(), resume_music=resume, play_station=play_station,
+        speakers=SimpleNamespace(list=speakers_list, select=select),
+        media=SimpleNamespace(station={"name": "Cheap Trick"}), library=SimpleNamespace(ready=True))
+    return mod.Assistant(state), calls
+
+
+def test_play_music_on_a_speaker_moves_what_is_playing(monkeypatch):
+    a, calls = _assistant_for_empty_play(playing=True, last="spotify", monkeypatch=monkeypatch)
+    r = asyncio.run(a._do_media_play("", speaker="sonos"))
+    assert calls == [("speaker", "Sonos Move")] and r["speech"] == "Moved the music to Sonos Move."
+
+
+def test_play_music_resumes_spotify_if_it_played_last(monkeypatch):
+    a, calls = _assistant_for_empty_play(playing=False, last="spotify", monkeypatch=monkeypatch)
+    r = asyncio.run(a._do_media_play("", speaker="sonos"))
+    assert calls == [("speaker", "Sonos Move"), ("resume",)] and "Resuming Spotify" in r["speech"]

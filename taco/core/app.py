@@ -89,6 +89,7 @@ class State:
                                     window_s=h["window_s"], interval_s=h["interval_s"])
         self.media = RadioPlayer(MUSIC_SINK, on_change=self.broadcast_media)
         self.spotify = SpotifyState()
+        self.last_source = "media"   # "spotify" or "media" (radio, NAS): what "play music" resumes
         sp = self.cfg["spotify"]
         self.spotify_api = (SpotifyClient(sp, self.http, TACO_HOME / "data" / "oauth", restart_player=self.spotify.stop)
                             if sp["client_id"] and sp["client_secret"] and sp["refresh_token"] else None)
@@ -159,6 +160,7 @@ class State:
         if self.media.playing:
             await self.media.stop()
         await self.spotify_api.play(thing)
+        self.last_source = "spotify"
 
     async def resume_music(self) -> bool:
         """Resume paused Spotify on Taco. False if there's nothing to resume."""
@@ -193,11 +195,13 @@ class State:
         if self.spotify.playing:
             await self._stop_spotify()
         await self.media.play(station)
+        self.last_source = "media"
 
     async def play_library(self, plan: Plan) -> None:
         if self.spotify.playing:
             await self._stop_spotify()
         await self.media.play(self.library.station(plan))
+        self.last_source = "media"
 
     async def _vacation_power(self, ids: list[int], on: bool) -> None:
         await self.devices.control(ids, "power", on)
@@ -951,8 +955,10 @@ async def media_status() -> dict[str, Any] | None:
 @app.post("/api/media/spotify")
 async def spotify_event(event: dict[str, Any]) -> dict[str, bool]:
     """Playback events from librespot's --onevent hook (deploy/spotify-event.sh)."""
-    if event.get("event") in ("playing", "started") and state.media.playing:
-        await state.media.stop(notify=False)   # Spotify takes over from the radio
+    if event.get("event") in ("playing", "started"):
+        if state.media.playing:
+            await state.media.stop(notify=False)   # Spotify takes over from the radio
+        state.last_source = "spotify"              # also when started from a phone
     state.spotify.update(event)
     await state.broadcast_media()
     return {"ok": True}
