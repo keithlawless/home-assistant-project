@@ -109,3 +109,64 @@ def test_resume_waits_out_idle_right_after_connecting(tmp_path):
     atv.metadata.playing = playing
     run(p, p._resume())
     assert atv.calls == ["pause", "play"]
+
+
+class FakeDirecTv(FakeAtv):
+    """Measured on DirecTV: "play" toggles, and a pause ad reports as Playing.
+    Over the ad, play returns to the paused program."""
+
+    def __init__(self, state="Playing"):
+        super().__init__(state)
+        self.ad = False
+
+    async def _play(self):
+        self.calls.append("play")
+        if self.ad:
+            self.ad, self.state = False, "Paused"
+        else:
+            self.state = "Paused" if self.state == "Playing" else "Playing"
+
+    def start_pause_ad(self):
+        self.ad, self.state = True, "Playing"
+
+
+def pauser_at(tmp_path, atv, paused_ago, playing_ago):
+    """A pauser that paused paused_ago s back, and saw Playing playing_ago s back."""
+    p = pauser(tmp_path, atv)
+    p._paused_by_us = True
+    now = time.monotonic()
+    p._paused_at = now - paused_ago
+    p._playing_since = None if playing_ago is None else now - playing_ago
+    return p
+
+
+def test_resumes_past_a_pause_ad(tmp_path):
+    atv = FakeDirecTv("Paused")
+    atv.start_pause_ad()                                      # 25 s into a 40 s turn
+    p = pauser_at(tmp_path, atv, paused_ago=40, playing_ago=15)
+    run(p, p._resume())
+    assert atv.calls == ["play", "play"] and atv.state == "Playing" and not atv.ad
+
+
+def test_leaves_alone_a_tv_someone_resumed_early(tmp_path):
+    atv = FakeDirecTv("Playing")                              # play pressed 5 s into the turn
+    p = pauser_at(tmp_path, atv, paused_ago=30, playing_ago=25)
+    run(p, p._resume())
+    assert atv.calls == [] and atv.state == "Playing"
+
+
+def test_still_paused_takes_one_play(tmp_path):
+    atv = FakeDirecTv("Paused")
+    p = pauser_at(tmp_path, atv, paused_ago=10, playing_ago=None)
+    run(p, p._resume())
+    assert atv.calls == ["play"] and atv.state == "Playing"
+
+
+def test_push_updates_time_the_switch_to_playing(tmp_path):
+    p = pauser(tmp_path)
+    p._on_state("Paused")
+    assert p._playing_since is None
+    p._on_state("Playing")
+    first = p._playing_since
+    p._on_state("Playing")                                    # repeats don't move it
+    assert p._playing_since == first

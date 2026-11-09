@@ -204,6 +204,9 @@ DEFAULTS: dict = {
         "rooms": ["living room"],   # mic names whose turns pause it
         "marker": str(TACO_HOME / "data" / "tv_paused.json"),
         "resume_within_s": 600,     # after a restart mid-turn, resume only this soon
+        # Back to Playing this long after Taco's pause = the app's pause ad
+        # (DirecTV starts one about 25 s in), not someone pressing play.
+        "pause_ad_after_s": 20,
     },
     "matter": {
         "url": "ws://127.0.0.1:5580/ws",
