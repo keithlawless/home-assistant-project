@@ -295,6 +295,21 @@ Then try "turn off the living room", "set a pasta timer for 9 minutes", or
   "play the radio on Sonos", using its name. Taco's voice stays in the kitchen.
 - **Spotify Connect:** Taco shows up as a speaker named "Taco" in the Spotify
   app.
+- **Pause the TV while you talk:** when a turn starts on a mic in an Apple TV's
+  room, Taco pauses the Apple TV (only if it's playing) and resumes it after
+  the reply, so nothing is missed. It pauses rather than mutes because an Apple
+  TV can't set a TV's volume to a level, only nudge it up or down. Pair it once,
+  from a terminal on the Pi, typing each PIN from the TV within about 30
+  seconds:
+
+  ```sh
+  cd ~/taco
+  .venv/bin/atvremote --scan-hosts <apple-tv-ip> --protocol companion --remote-name Taco pair
+  .venv/bin/atvremote --scan-hosts <apple-tv-ip> --protocol airplay --remote-name Taco pair
+  ```
+  Then set `[tv] apple_tv = "<apple-tv-ip>"` in `config.toml` (`rooms`
+  defaults to `["living room"]`) and restart taco-voice. Pairing keeps its keys
+  in `~/.pyatv.conf`.
 
 ## Developing
 

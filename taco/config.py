@@ -186,6 +186,14 @@ DEFAULTS: dict = {
         #   token = "..."   # openssl rand -hex 24; keep it out of the repo
         "senders": [],
     },
+    "tv": {
+        # Pause an Apple TV while Taco takes a turn in its room (taco/voice/tv.py).
+        # Set apple_tv to its IP address, after pairing it once (README).
+        "apple_tv": "",
+        "rooms": ["living room"],   # mic names whose turns pause it
+        "marker": str(TACO_HOME / "data" / "tv_paused.json"),
+        "resume_within_s": 600,     # after a restart mid-turn, resume only this soon
+    },
     "matter": {
         "url": "ws://127.0.0.1:5580/ws",
         # Needed only to set up brand-new Matter devices over Bluetooth.
