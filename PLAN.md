@@ -199,72 +199,16 @@ A common `TTSEngine` interface streams sentence by sentence, so speech starts be
     to use the app, which is fine for one household.
 - **Telegram remote control** (deferred 2026-10-09). Text Taco from a phone
   through the Hermes Telegram gateway; needs a bot token from @BotFather.
-- **Living-room satellite: listening light, mute button, OTA updates**
-  (queued 2026-11-05). The Waveshare ESP32-S3-AUDIO-Board's LED ring and
-  buttons aren't used yet, and every firmware change means a USB reflash.
-  - Back channel: today the satellite only streams mic audio to taco-voice.
-    Add short control lines from taco-voice down the same TCP socket
-    (`STATE listening|thinking|speaking|idle`, `MUTE on|off`), so the ring can
-    follow Taco's state. Older firmware simply ignores them.
-  - Light: a colour per state on the LED ring (listening, thinking,
-    speaking), off when idle. A dim red ring while muted.
-  - Mute: a button press stops the stream (or sends silence), lights the
-    ring red and tells taco-voice, which logs it and shows it on the kiosk.
-    It should also follow the kiosk's "stop listening" privacy mode. A
-    hardware mute that stays on the board is the point: it must not depend
-    on the Pi.
-  - OTA: a two-slot OTA partition table (the board has 16 MB flash), with
-    the board pulling a new image from the Pi over the LAN (`esp_https_ota`
-    or plain HTTP plus a SHA-256 check), triggered by a control line or a
-    long button press. A new image that fails to reconnect rolls back on
-    its own. One last USB flash is needed to switch to the OTA layout.
-  - To confirm first: the LED ring and button GPIOs (and whether they sit
-    behind an I/O expander) from the Waveshare schematic.
-- **Living-room satellite: replies on its own speaker** (queued 2026-11-05).
-  A living-room turn currently replies on the kitchen speaker.
-  - Stream Taco's reply audio (TTS, chimes) down the satellite socket to the
-    board's ES8311 DAC and speaker amp. Music stays on the Sonos / Taco Music
-    path. Only voice replies to turns that started on the satellite move.
-  - Echo: the satellite will hear its own reply. To start, the Pi flushes
-    the satellite's audio after playback, as it already does for the
-    kitchen speaker. Barge-in on the satellite needs echo cancellation on
-    the board: ESP-SR's AFE can use the ES7210's MIC3 speaker-loopback
-    channel as its reference. The same AFE adds beamforming and noise
-    suppression, the longer-term fix for TV noise from the 2026-11-05
-    wake analysis.
-  - Decided 2026-11-05: only replies to satellite turns play there.
-    Alarms, timers and announcements stay on the kitchen speaker. The wake
-    chime plays in both rooms: on the satellite, and on the kitchen speaker
-    as today.
-  - Depends on the back channel from the item above, so build that first.
-- **Living-room satellite: on-board speech front end** (queued 2026-11-05).
-  The firmware averages MIC1 and MIC2, so it can't favour the speaker's
-  direction over the TV. The 2026-11-05 wake analysis showed TV noise
-  pulling real "Hey Taco" scores down to 0.1-0.3.
-  - Run ESP-SR's AFE on the board, with its own wake word (WakeNet) off:
-    two-mic beamforming / source separation plus noise suppression, giving
-    the mono 16 kHz stream taco-voice already expects. Once the speaker
-    item lands, feed MIC3 (the speaker loopback) in as the AEC reference.
-  - Needs PSRAM. It isn't enabled in `sdkconfig.defaults` today; confirm
-    the board's module (ESP32-S3R8, 8 MB?) and turn it on.
-  - Expect the audio to change: levels and spectrum will differ from what
-    the wake model, verifier and tuning were fitted to. Make the AFE
-    switchable at run time (a control line, with the setting kept in NVS),
-    and report it in the handshake so clips record `afe: on|off`. Then:
-    - A/B the same TV-on scenes with the AFE on and off, using the mix
-      replay from 2026-11-05 as a reference.
-    - Retrain the verifier on AFE clips, or keep both kinds in its
-      training set.
-    - Re-check `local_priority_db` / `local_listen_db` (the satellite's
-      level relative to the kitchen will move), `satellite_vad_aggressiveness`
-      and `satellite_lag_s` (the AFE adds latency).
-    - Keep the AFE's AGC off at first, because the kitchen-priority margin
-      relies on raw levels.
-  - Watch CPU and heat on the ESP32-S3 with the AFE and Wi-Fi together.
-    Audio drops show up as `mic 'living room': no audio` on the Pi.
-
-  **Build order for the satellite items, with one USB flash:** (1) OTA
-  partition layout and pull-from-Pi updates, so everything after it ships
-  over Wi-Fi; (2) the control back channel; (3) the light and mute
-  button; (4) the AFE behind its switch, then tuning; (5) speaker replies,
-  turning on AEC with the MIC3 reference.
+- **Living-room satellite extras: done** (built 2026-11-05 to 11-09, all five
+  steps of the satellite build order): OTA updates pulled from the Pi with
+  rollback (#12), the control back channel (#13), the listening light and K2
+  mute (#14), both mics streamed (#15), ESP-SR source separation behind a
+  switch, with its own kitchen-priority cutoffs (#17, #19), and replies on the
+  satellite's own speaker (living-room turns only; alarms, timers and
+  announcements stay in the kitchen; the wake chime plays in both rooms).
+  Details are in `satellite/esp32/README.md`.
+  - Still open: **barge-in from the living room**. It needs the AFE's echo
+    cancellation, with the ES7210's speaker-loopback channel as reference
+    (`aec_init` in `afe_start()`). Until then, Taco ignores the living-room
+    mic while it talks there.
+  - Ongoing: retrain the wake verifier as front-end clips accumulate.

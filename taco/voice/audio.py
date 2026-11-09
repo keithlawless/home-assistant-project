@@ -400,7 +400,8 @@ class NetworkMicrophone(_FrameSource):
             if old:
                 _close(old)
             log.info("satellite %r: connected from %s%s", self.name, ip,
-                     f" (speech front end {self.afe}, {channels} ch)" if self.afe else "")
+                     (f" (speech front end {self.afe}, {channels} ch{', speaker' if self.speaker else ''})"
+                      if self.afe else ""))
             if self.on_connect:
                 self.on_connect(self)
             stream = conn.makefile("rb")
