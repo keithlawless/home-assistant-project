@@ -117,7 +117,11 @@ class RadioPlayer:
             target = f"--playlist={PLAYLIST}"
         else:
             target = station["url"]
-        self._proc = await asyncio.create_subprocess_exec(*args, target,
+        # WirePlumber restores a saved volume per media.role, and Spotify's
+        # ducking leaves one for "Music" at 0.008 (-42 dB), which mpv's stream
+        # would pick up. Ducking here goes through mpv's own volume instead.
+        env = {**os.environ, "PIPEWIRE_PROPS": "{ state.restore-props = false }"}
+        self._proc = await asyncio.create_subprocess_exec(*args, target, env=env,
                                                           stdout=asyncio.subprocess.DEVNULL,
                                                           stderr=asyncio.subprocess.DEVNULL)
         self.station = station
