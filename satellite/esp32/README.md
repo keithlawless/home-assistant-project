@@ -89,7 +89,15 @@ A new image is on trial. Once it has streamed to Taco for 10 s, it's kept (`firm
 
 A reset while an image is still on trial (its first few seconds after an update) also counts as a failure and rolls it back. So after an update, give it about 30 s before pressing **RESET**.
 
-For another satellite, pass its name: `deploy/satellite-ota.sh "bedroom"` serves `/srv/taco/satellite/bedroom.bin`, or set `firmware = "..."` in its `[[audio.satellites]]` entry.
+### More satellites
+Each board needs its own name, port and token:
+1. Copy `main/secrets.h` to `main/secrets.<board>.h` (spaces become `_`, e.g. `secrets.bedroom.h`; git-ignored). Change `SAT_NAME`, give it its own `TACO_PORT` (10701, 10702, …) and a new `SAT_TOKEN` (`openssl rand -hex 24`).
+2. Add its `[[audio.satellites]]` entry to `/srv/taco/config.toml` with the same name, port and token (and `volume`; 50 is a good start into an external amp), then restart taco-voice and taco-core. Its name is also its music room.
+3. For echo cancellation, which keeps the wake word working over music, turn its speech front end on: `echo on > /srv/taco/satellite/<board>.afe`.
+4. Flash it once over USB with that board's secrets: `TACO_SAT=<board> pio run -t erase && TACO_SAT=<board> pio run -t upload --upload-port ...` (touch `CMakeLists.txt` first if you built another board last).
+5. After that, `deploy/satellite-ota.sh "<name>"` builds with `secrets.<board>.h` and serves `/srv/taco/satellite/<board>.bin`. Without a name it's the living room (`secrets.h`).
+
+**Into an amplified speaker:** the board has no line-out; its speaker header is a bridged (BTL) class-D output, so neither wire is ground. Feed it through a transformer-isolated speaker-to-line converter (both converter inputs in parallel for a mono signal on both channels) into the amp's aux input. Never connect either speaker wire to ground.
 
 ## Control lines from Taco
 taco-voice writes short text lines down the satellite's connection, and the board's receive task reads them as they arrive. A satellite that doesn't read them (older firmware, `taco_satellite.py`) just ignores them.
