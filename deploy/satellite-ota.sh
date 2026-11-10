@@ -11,8 +11,18 @@
 set -euo pipefail
 PI="${TACO_PI:-taco@192.168.4.239}"
 NAME="${1:-living room}"
-FILE="${NAME// /_}.bin"
+BOARD="${NAME// /_}"
+FILE="$BOARD.bin"
 cd "$(dirname "$0")/../satellite/esp32"
+# Each board other than the first has its own secrets.<board>.h (name, port, token).
+if [ -f "main/secrets.$BOARD.h" ]; then
+  export TACO_SAT="$BOARD"
+elif [ "$NAME" != "living room" ]; then
+  echo "no main/secrets.$BOARD.h for '$NAME'; see satellite/esp32/README.md" >&2
+  exit 1
+else
+  export TACO_SAT=""
+fi
 
 # A unique version per build: the board takes any image whose version differs
 # from its own. "+" marks uncommitted changes to the firmware.

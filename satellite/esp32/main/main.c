@@ -88,7 +88,13 @@
 #include "esp_afe_config.h"
 #include "esp_psram.h"
 
+// Each board's Wi-Fi, name, port and token: secrets.h, or secrets.<board>.h
+// when built with TACO_SAT=<board> (deploy/satellite-ota.sh does this).
+#ifdef TACO_SECRETS
+#include TACO_SECRETS
+#else
 #include "secrets.h"
+#endif
 
 static const char *TAG = "taco-sat";
 
