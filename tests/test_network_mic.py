@@ -215,6 +215,8 @@ def test_new_firmware_image_asks_satellite_to_update(tmp_path):
 
 
 class FakeSat:
+    name = "living room"
+
     def __init__(self):
         self.lines = []
         self.second = object()   # its front end's second channel
@@ -228,11 +230,12 @@ def _loop_with_satellite():
 
     loop = VoiceLoop.__new__(VoiceLoop)   # no models or devices
     sat = FakeSat()
-    loop.listeners = [(object(), None), (sat, None)]
+    loop.listeners = [(type("Mic", (), {"name": "kitchen"})(), None), (sat, None)]
     loop.active = loop.listeners[0]
     loop.state, loop.muted = "idle", False
     loop.events = type("E", (), {"send": lambda self, *a, **k: None})()
     loop._satellites = lambda: [sat]
+    loop.music = type("M", (), {"reconnected": lambda self, name: None})()
     return loop, sat
 
 

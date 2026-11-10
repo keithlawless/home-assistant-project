@@ -17,7 +17,7 @@ What it does:
 - **Kitchen timers and alarms** that survive a reboot, plus reminders, and recipes you can step through hands-free
 - **Smart home control:** Kasa HS103/HS105 plugs and Matter-over-Wi-Fi devices, with discovery, rooms, scenes and schedules (including sunrise and sunset)
 - **Shopping and to-do lists**, a calendar briefing, and web-search answers
-- **Music:** internet radio, Spotify Connect, a music collection on a NAS, and "play on Sonos" for any Bluetooth speaker
+- **Music:** internet radio, Spotify Connect, a music collection on a NAS, "play on Sonos" for any Bluetooth speaker, and music in whichever room you ask from (satellites with speakers), or everywhere
 - **Mic satellites** for other rooms (an ESP32-S3 board that streams its mic to the Pi)
 - **Notifications** on screen from Pi health checks, local scripts, or outside senders through a locked-down webhook
 
@@ -293,6 +293,13 @@ Then try "turn off the living room", "set a pasta timer for 9 minutes", or
   `[music]` (WebDAV). Taco indexes it and plays it by artist, album or song.
 - **Bluetooth speakers:** pair the speaker once with `bluetoothctl`, then say
   "play the radio on Sonos", using its name. Taco's voice stays in the kitchen.
+- **Music in each room:** a mic satellite with a speaker is also a music room,
+  named after its `[[audio.satellites]]` entry. Music plays in the room you ask
+  from ("play jazz" in the bedroom plays only there), or where you say: "play
+  jazz in the kitchen", "play music everywhere", "move the music to the living
+  room", "play it here". "Turn it up" in a satellite room changes that room's
+  speaker. Music only ducks for a request in a room where it's playing. After
+  half an hour without music, it goes back to the kitchen.
 - **Spotify Connect:** Taco shows up as a speaker named "Taco" in the Spotify
   app.
 - **Spotify by voice** (Premium): "play Miles Davis on Spotify", "play my

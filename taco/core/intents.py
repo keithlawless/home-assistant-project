@@ -343,8 +343,13 @@ def _speaker_intent(text: str) -> Intent | None:
             and not text.startswith("play "):
         return Intent("list_speakers")
     if re.fullmatch(rf"(?:play|{_MOVE}) {_BACK}", text) or text == "play here":
-        return Intent("set_speaker", {"name": None})
+        # "here" is the room the request came from; the kitchen is a room.
+        return Intent("set_speaker", {"name": "kitchen" if "kitchen" in text else None})
+    if m := re.fullmatch(rf"(?:{_MOVE}|play it) (?:to |in |into )?(?P<name>everywhere|every room|all (?:the )?rooms"
+                         r"|(?:all over |throughout )?the (?:whole )?house)", text):
+        return Intent("set_speaker", {"name": m.group("name")})
     if m := (re.fullmatch(rf"(?:play|{_MOVE}) (?:on|through|over|to|over to) (?:the |my )?(?P<name>.+?)(?: speaker)?", text)
+             or re.fullmatch(rf"{_MOVE} (?:in|into) (?:the |my )?(?P<name>.+?)(?: speaker)?", text)
              or re.fullmatch(r"use (?:the |my )?(?P<name>.+?) speaker", text)):
         name = m.group("name")
         if name not in ("radio", "the radio", "repeat", "shuffle", "spotify"):

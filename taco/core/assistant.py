@@ -22,7 +22,8 @@ from .devices.match import resolve
 from .lists import canonical, split_items
 from .media import run, search_stations
 from .oauth import OAuthError
-from .speakers import KITCHEN, Speaker, resolve as resolve_speaker
+from .speakers import _EVERYWHERE, KITCHEN, KITCHEN_ROOM, Speaker, describe_rooms, resolve_rooms
+from .speakers import resolve as resolve_speaker
 from .spotify import SpotifyError
 from .intents import Intent, normalize, parse, say_clock, say_duration
 from .timers import Timer
@@ -391,27 +392,35 @@ class Assistant:
     async def _do_media_play(self, query: str, speaker: str | None = None, radio: bool = False,
                              by: str | None = None, kind: str | None = None,
                              pick: str | None = None, year: int | None = None) -> dict[str, Any]:
-        chosen = resolve_speaker(speaker, await self.state.speakers.list()) if speaker else None
-        if speaker and chosen is None:
+        if speaker is None:
+            query, speaker = self._split_place(query)   # "jazz in the bedroom", "music everywhere"
+        if speaker is None and by:
+            by, speaker = self._split_place(by)          # "kind of blue by miles davis in the bedroom"
+            by = by or None
+        target = await self._target(speaker)
+        if speaker and target is None:
             query = f"{query} on {speaker}".strip()   # "rock on KEXP" is a station
-        where = f" on {chosen.name}" if chosen and not chosen.is_kitchen else ""
+            speaker = None
+        target = target or ("rooms", {self.here})
+        where = self._where(target)
 
         async def switch() -> bool:
-            """Move to the requested speaker, only once there's something to play."""
-            return chosen is None or await self.state.speakers.select(chosen)
+            """Move to where it was asked for (the asking room by default),
+            only once there's something to play."""
+            return await self._go(target, explicit=speaker is not None)
 
         if not query and not by and not radio:
             # "Play music (on the Sonos)": keep what's playing, or resume what
             # played last; never swap Spotify for the last radio or NAS request.
             if self.state.music_playing:
-                if chosen is None:
-                    return _reply("It's already playing.")
+                if self._already(target, speaker):
+                    return _reply(f"It's already playing{where}.")
                 if not await switch():
-                    return _reply(self._unreachable(chosen))
-                return _reply(f"Moved the music to {chosen.name}." if where else "Moved the music back here.")
+                    return _reply(self._unreachable(target))
+                return _reply(f"Moved the music {self._moved(target)}.")
             if self.state.last_source == "spotify" and self.state.spotify.track and self.state.spotify_api:
                 if not await switch():
-                    return _reply(self._unreachable(chosen))
+                    return _reply(self._unreachable(target))
                 try:
                     await self.state.resume_music()
                 except (SpotifyError, httpx.HTTPError, OAuthError) as e:
@@ -429,7 +438,7 @@ class Assistant:
                 plan = await asyncio.to_thread(library.resolve, query, by, kind)
             if plan:
                 if not await switch():
-                    return _reply(self._unreachable(chosen))
+                    return _reply(self._unreachable(target))
                 await self.state.play_library(plan)
                 return _reply(f"Playing {plan.name}{where}.")
             # An artist we have, asked for in a way the fast path can't sort out
@@ -445,7 +454,7 @@ class Assistant:
             thing = await self._spotify_resolve(query, by, kind)
             if thing:
                 if not await switch():
-                    return _reply(self._unreachable(chosen))
+                    return _reply(self._unreachable(target))
                 return await self._play_spotify(thing, where)
             if kind == "album":
                 return _reply(f"I couldn't find an album called {query}.")
@@ -464,7 +473,7 @@ class Assistant:
                     return {"handled": False}   # Hermes may know a better station name
                 station = stations[0]
             if not await switch():
-                return _reply(self._unreachable(chosen))
+                return _reply(self._unreachable(target))
             await self.state.play_station(station)
         except (httpx.HTTPError, OSError) as e:
             log.warning("radio failed: %s", e)
@@ -499,19 +508,21 @@ class Assistant:
             if playlist or kind in ("liked", "playlist"):
                 return {"handled": False}
             return _reply("Spotify isn't set up yet.")
-        chosen = resolve_speaker(speaker, await self.state.speakers.list()) if speaker else None
-        if speaker and chosen is None:
+        if speaker is None and not playlist:
+            query, speaker = self._split_place(query)
+        target = await self._target(speaker)
+        if speaker and target is None:
             return _reply(f"I don't know a speaker called {speaker}.")
+        target = target or ("rooms", {self.here})
         thing = await self._spotify_resolve(query, by, kind, playlist, mine)
         if thing is None:
             if mine or self.state.spotify_api.is_made_for_you(query):
                 return self._missing_playlist(query)
             what = f"a playlist called {query}" if playlist else (query or "that")
             return _reply(f"I couldn't find {what} on Spotify.")
-        if chosen and not await self.state.speakers.select(chosen):
-            return _reply(self._unreachable(chosen))
-        where = f" on {chosen.name}" if chosen and not chosen.is_kitchen else ""
-        return await self._play_spotify(thing, where)
+        if not await self._go(target, explicit=speaker is not None):
+            return _reply(self._unreachable(target))
+        return await self._play_spotify(thing, self._where(target))
 
     @staticmethod
     def _missing_playlist(query: str) -> dict[str, Any]:
@@ -590,38 +601,107 @@ class Assistant:
 
     # -- speakers ----------------------------------------------------------------
 
+    @property
+    def here(self) -> str:
+        """The room this request came from, as a music room."""
+        return self.state.room(self.room)
+
+    def _split_place(self, query: str) -> tuple[str, str | None]:
+        """Take a room off the end of a play request: ("jazz in the bedroom")
+        -> ("jazz", "in the bedroom"); "music everywhere" -> ("", "everywhere").
+        Only known rooms, so "singing in the rain" stays a song."""
+        names = "|".join(re.escape(normalize(r)) for r in sorted(self.state.speakers.all_rooms, key=len, reverse=True))
+        room = rf"(?:the )?(?:{names})(?: room)?"
+        m = re.fullmatch(rf"(?:(?P<q>.*?) )?(?P<p>in {room}(?: and {room})*|{_EVERYWHERE.pattern}|(?:in )?here)", query)
+        if not m:
+            return query, None
+        q = (m.group("q") or "").strip()
+        return ("" if q in ("music", "some music", "radio", "the radio", "the music") else q), m.group("p")
+
+    async def _target(self, spoken: str | None) -> tuple[str, Any] | None:
+        """Where a request wants music: ("rooms", {room, ...}) or ("bt", a
+        Bluetooth speaker); None if `spoken` is neither. No place: here."""
+        speakers = self.state.speakers
+        rooms = resolve_rooms(spoken, self.here, speakers.all_rooms)
+        if rooms is not None:
+            return "rooms", rooms
+        chosen = resolve_speaker(spoken, await speakers.list())
+        if chosen is None or chosen.is_kitchen:
+            return None
+        return "bt", chosen
+
+    async def _go(self, target: tuple[str, Any], explicit: bool) -> bool:
+        """Move the music there. A request in the kitchen that doesn't name a
+        place leaves a Bluetooth speaker standing in for the kitchen alone."""
+        speakers = self.state.speakers
+        kind, where = target
+        if kind == "bt":
+            return await speakers.select(where)
+        if explicit and KITCHEN_ROOM in where and speakers.current:
+            await speakers.back("asked")
+        await speakers.set_rooms(where)
+        return True
+
+    def _already(self, target: tuple[str, Any], spoken: str | None) -> bool:
+        """Is music already set to play there?"""
+        speakers = self.state.speakers
+        kind, where = target
+        if kind == "bt":
+            return bool(speakers.current and speakers.current.mac == where.mac)
+        if spoken is None:   # "play music" in a room where it's already playing
+            return self.here in speakers.rooms
+        return where == speakers.rooms and not (KITCHEN_ROOM in where and speakers.current)
+
+    def _where(self, target: tuple[str, Any]) -> str:
+        """\" in the bedroom", " everywhere", " on Sonos Move"; "" for here."""
+        kind, where = target
+        if kind == "bt":
+            return f" on {where.name}"
+        text = describe_rooms(where, self.here, self.state.speakers.all_rooms)
+        return "" if text == "here" else f" {text}"
+
+    def _moved(self, target: tuple[str, Any]) -> str:
+        """For "Moved the music ...": "here", "to the bedroom", "to Sonos Move"."""
+        where = self._where(target).strip()
+        if not where or where == "everywhere":
+            return where or "here"
+        return "to " + where.removeprefix("in ").removeprefix("on ")
+
     @staticmethod
-    def _unreachable(speaker: Speaker) -> str:
-        return f"I couldn't connect to {speaker.name}. Make sure it's on and nearby."
+    def _unreachable(target: tuple[str, Any]) -> str:
+        speaker = target[1]
+        name = speaker.name if isinstance(speaker, Speaker) else "that speaker"
+        return f"I couldn't connect to {name}. Make sure it's on and nearby."
 
     async def _do_list_speakers(self) -> dict[str, Any]:
-        found = await self.state.speakers.list()
-        if not found:
+        speakers = self.state.speakers
+        found = await speakers.list()
+        places = [KITCHEN.name, *[f"the {r}" for r in speakers.all_rooms[1:]], *[s.name for s in found]]
+        if len(places) == 1:
             return _reply("Right now I can only play music on the kitchen speaker. To add one, "
                           "put it in pairing mode and say pair a new speaker.")
-        speech = f"I can play music on {_join([KITCHEN.name, *[s.name for s in found]])}."
-        if current := self.state.speakers.current:
+        speech = f"I can play music on {_join(places)}."
+        if current := speakers.current:
             speech += f" Music is on {current.name} right now."
+        elif speakers.rooms != {KITCHEN_ROOM}:
+            speech += f" Music is set to play {describe_rooms(speakers.rooms, self.here, speakers.all_rooms)}."
         return _reply(speech)
 
     async def _do_set_speaker(self, name: str | None) -> dict[str, Any]:
         speakers = self.state.speakers
-        found = await speakers.list()
-        chosen = resolve_speaker(name, found)
-        if chosen is None:
-            known = f"I know {_join([KITCHEN.name, *[s.name for s in found]])}." if found \
-                else "Say pair a new speaker to add one."
+        target = await self._target(name)
+        if target is None:
+            found = await speakers.list()
+            known = f"I know {_join([*speakers.all_rooms, *[s.name for s in found]])}."
             return _reply(f"I don't know a speaker called {name}. {known}")
-        if chosen.is_kitchen:
-            if not speakers.current:
-                return _reply("Music is already on the kitchen speaker.")
-            await speakers.back("asked")
-            return _reply("OK, music is back on the kitchen speaker.")
-        if speakers.current and speakers.current.mac == chosen.mac:
-            return _reply(f"Music is already on {chosen.name}.")
-        if not await speakers.select(chosen):
-            return _reply(self._unreachable(chosen))
-        return _reply(f"OK, music will play on {chosen.name}.")
+        where = self._where(target)
+        if self._already(target, name if name is not None else "here"):
+            return _reply(f"Music is already playing{where or ' here'}.")
+        if not await self._go(target, explicit=True):
+            return _reply(self._unreachable(target))
+        if target[0] == "bt" or not self.state.music_playing:
+            return _reply(f"OK, music will play{where or ' here'}.")
+        return _reply(f"Moved the music {self._moved(target)}.")
 
     async def _do_pair_speaker(self) -> dict[str, Any]:
         if self._pairing and not self._pairing.done():
@@ -699,6 +779,12 @@ class Assistant:
         return _reply(speech + ".")
 
     async def _do_volume(self, set: float | None = None, step: float | None = None) -> dict[str, Any]:
+        if self.here in self.state.room_volumes:
+            # A satellite room: its own speaker (music and replies there).
+            now = self.state.room_volumes[self.here] / 100
+            level = set if set is not None else min(1.0, max(0.1, now + (step or 0)))
+            await self.state.set_room_volume(self.here, round(level * 100))
+            return _reply(f"Volume {round(level * 10)}.")
         target = await self.state.speakers.volume_target()   # the Bluetooth speaker, if music is on one
         if set is not None:
             level = set

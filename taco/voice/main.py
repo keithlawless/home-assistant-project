@@ -34,6 +34,7 @@ from .audio import (Microphone, NetworkMicrophone, SatelliteChannel, SatelliteMi
 from .core_link import CoreLink
 from .hermes import HermesClient, asks_question
 from .listen import record_request
+from .music import SatelliteMusic
 from .stt import Transcriber, build_vocabulary
 from .tts import EngineCache
 from .wake import WakeWord, verifier_path
@@ -198,6 +199,7 @@ class VoiceLoop:
         self.announcer = Speaker(audio["output_device"])   # alerts, scheduled messages
         self._alarm_speaker = Speaker(audio["output_device"])
         self.alarm = AlarmPlayer(self._room_speaker, self.synthesize)
+        self.music = SatelliteMusic(self._satellites)   # music in satellite rooms (taco-core picks)
         self.core = CoreLink(cfg["core"]["url"], self._on_core_message)
         tv = cfg["tv"]
         self.tv = (TvPauser(tv["apple_tv"], tv["rooms"], tv["marker"], tv["resume_within_s"], tv["pause_ad_after_s"])
@@ -280,6 +282,8 @@ class VoiceLoop:
             self.announcer.play(ANNOUNCE_CHIME, 22050)
         if kind in ("timers", "snapshot"):
             self.alarm.update(msg.get("timers") or [])
+        if kind == "music_route" or (kind == "snapshot" and msg.get("music_route")):
+            self._music_route(msg if kind == "music_route" else msg["music_route"])
         if kind in ("settings", "snapshot") and msg.get("settings"):
             self._apply_settings(msg["settings"])
         if kind == "voice_command":
@@ -362,14 +366,25 @@ class VoiceLoop:
         here = self.active[0] is sat or self.active[0] is sat.second
         return f"STATE {self.state} {'here' if here else 'elsewhere'}"
 
+    def _music_route(self, route: dict[str, Any]) -> None:
+        """taco-core's choice: which satellites play music, and their volumes."""
+        for sat in self._satellites():
+            volume = (route.get("volumes") or {}).get(sat.name)
+            if volume is not None and volume != getattr(sat, "volume", None):
+                sat.volume = int(volume)
+                sat.send_line(f"VOLUME {sat.volume}")
+        self.music.set_rooms(route.get("rooms") or [])
+
     def _set_state(self, state: str) -> None:
         self.state = state
-        self.events.send("state", state=state)
+        # The room lets taco-core duck music only where the turn is.
+        self.events.send("state", state=state, **({} if state == "idle" else {"room": _room(self.active[0])}))
         for sat in self._satellites():
             sat.send_line(self._state_line(sat))
 
     def _sync_satellite(self, sat) -> None:
         """A satellite (re)connected: tell it where things stand."""
+        self.music.reconnected(sat.name)
         sat.send_line(f"MUTE {'on' if self.muted else 'off'}")
         sat.send_line(self._state_line(sat))
         if getattr(sat, "volume", None) is not None:

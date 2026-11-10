@@ -200,3 +200,78 @@ def test_pair_skips_known_and_non_audio(monkeypatch):
     found = asyncio.run(s.pair(scan_s=1))
     assert found == Speaker("JBL Flip 6", new)
     assert fake.ran("bluetoothctl", "trust", new) and not fake.ran("bluetoothctl", "pair", phone)
+
+
+# -- rooms ---------------------------------------------------------------------
+
+ROOMS = ["kitchen", "living room", "bedroom"]
+
+
+@pytest.mark.parametrize("spoken,expected", [
+    (None, {"bedroom"}), ("here", {"bedroom"}), ("in here", {"bedroom"}), ("this room", {"bedroom"}),
+    ("the kitchen", {"kitchen"}), ("kitchen speaker", {"kitchen"}), ("in the living room", {"living room"}),
+    ("everywhere", set(ROOMS)), ("all the rooms", set(ROOMS)), ("the whole house", set(ROOMS)),
+    ("the kitchen and the bedroom", {"kitchen", "bedroom"}), ("sonos", None), ("garage", None),
+])
+def test_resolve_rooms(spoken, expected):
+    assert sp.resolve_rooms(spoken, "bedroom", ROOMS) == expected
+
+
+def test_describe_rooms():
+    assert sp.describe_rooms({"bedroom"}, "bedroom", ROOMS) == "here"
+    assert sp.describe_rooms({"bedroom"}, "kitchen", ROOMS) == "in the bedroom"
+    assert sp.describe_rooms(set(ROOMS), "kitchen", ROOMS) == "everywhere"
+    assert sp.describe_rooms({"bedroom", "kitchen"}, "living room", ROOMS) == "in the kitchen and the bedroom"
+
+
+def make_rooms(fake, clock=None, playing=lambda: False):
+    changes = []
+
+    async def on_change():
+        changes.append(1)
+    s = Speakers(1800, music_playing=playing, on_change=on_change, clock=clock or (lambda: 0.0),
+                 satellite_rooms=["living room", "bedroom"])
+    return s, changes
+
+
+def test_rooms_without_the_kitchen_mute_its_output(monkeypatch):
+    fake = Fake(monkeypatch)
+    s, changes = make_rooms(fake)
+
+    async def go():
+        await s.set_rooms({"bedroom"})
+        assert s.satellite_rooms == ["bedroom"]
+        assert fake.ran("wpctl", "set-mute", "0", "1")
+        await s.set_rooms({"bedroom", "kitchen"})
+        assert fake.ran("wpctl", "set-mute", "0", "0")
+        assert s.satellite_rooms == ["bedroom"]
+        await s.set_rooms({"garage"})   # unknown rooms: the kitchen
+        assert s.rooms == {"kitchen"}
+    asyncio.run(go())
+    assert len(changes) == 3
+
+
+def test_leaving_the_kitchen_lets_the_bluetooth_speaker_go(monkeypatch):
+    fake = Fake(monkeypatch)
+    s, _ = make_rooms(fake)
+
+    async def go():
+        await s.select(SONOS)
+        assert s.rooms == {"kitchen"}
+        await s.set_rooms({"living room"})
+        assert s.current is None and fake.ran("bluetoothctl", "disconnect", MAC)
+    asyncio.run(go())
+
+
+def test_rooms_go_back_to_the_kitchen_after_idle(monkeypatch):
+    fake = Fake(monkeypatch)
+    now = [0.0]
+    s, _ = make_rooms(fake, clock=lambda: now[0])
+
+    async def go():
+        await s.set_rooms({"bedroom"})
+        await s.check()                    # idle clock starts
+        now[0] = 1801
+        await s.check()
+        assert s.rooms == {"kitchen"} and fake.ran("wpctl", "set-mute", "0", "0")
+    asyncio.run(go())

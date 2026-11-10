@@ -401,7 +401,7 @@ def play_radio(query: str | None = None, url: str | None = None, name: str | Non
     """Play internet radio: the best match for `query`, or a specific stream
     `url` (with its `name`) from find_radio_stations."""
     body = {"url": url, "name": name} if url else {"query": query or "jazz"}
-    return _call("POST", "/api/media/play", json=body)
+    return _call("POST", "/api/media/play", json={**body, "room": "turn"})
 
 
 @mcp.tool()
@@ -431,7 +431,7 @@ def play_music(artist: str | None = None, album: str | None = None, title: str |
     """Play from the music collection: an artist (shuffled), an album (in
     order, optionally with its artist) or a song title (optionally with its
     artist). Use names as search_music returned them."""
-    return _call("POST", "/api/music/play", json={"artist": artist, "album": album, "title": title})
+    return _call("POST", "/api/music/play", json={"artist": artist, "album": album, "title": title, "room": "turn"})
 
 
 @mcp.tool()
@@ -464,9 +464,9 @@ def spotify_my_playlists() -> list[dict]:
 def spotify_play(uri: str | None = None, query: str | None = None, name: str | None = None) -> dict:
     """Play on Taco through Spotify: a `uri` from spotify_search or
     spotify_my_playlists (with its `name`, for the screen), or the best
-    match for `query`. Plays wherever music is currently routed (e.g. the
-    Sonos; see play_on_speaker)."""
-    return _call("POST", "/api/spotify/play", json={"uri": uri, "query": query, "name": name})
+    match for `query`. Plays in the room the user asked from (see
+    play_on_speaker to send it elsewhere)."""
+    return _call("POST", "/api/spotify/play", json={"uri": uri, "query": query, "name": name, "room": "turn"})
 
 
 @mcp.tool()
@@ -479,17 +479,19 @@ def spotify_control(action: str) -> dict:
 
 @mcp.tool()
 def list_speakers() -> dict:
-    """Speakers music (radio, Spotify) can play on, and the current one. Taco's
-    own voice always stays on the kitchen speaker."""
+    """Speakers and rooms music (radio, Spotify) can play in, and where it
+    plays now. Music plays in the room the user asked from unless they name
+    another room, a speaker, or "everywhere"."""
     return _call("GET", "/api/speakers")
 
 
 @mcp.tool()
 def play_on_speaker(name: str | None = None) -> dict:
-    """Send music to a paired Bluetooth speaker by name ("Sonos"), or back to
-    the kitchen speaker with no name. Temporary: it goes back to the kitchen
-    after half an hour without music."""
-    return _call("POST", "/api/speakers/select", json={"name": name})
+    """Send music to a room ("bedroom", "living room", "kitchen"), several
+    ("kitchen and bedroom"), "everywhere", "here" (the user's room), or a
+    paired Bluetooth speaker by name ("Sonos"); no name: the kitchen speaker.
+    Temporary: it goes back to the kitchen after half an hour without music."""
+    return _call("POST", "/api/speakers/select", json={"name": name, "room": "turn"})
 
 
 @mcp.tool()
