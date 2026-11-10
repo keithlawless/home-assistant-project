@@ -1,6 +1,6 @@
 # ESP32 mic satellite (Waveshare ESP32-S3-AUDIO-Board)
 
-This firmware turns the Waveshare ESP32-S3-AUDIO-Board into a Taco mic satellite. It mixes the board's two mics to mono and streams them to taco-voice over Wi-Fi. The ES7210 is read as four 16-bit channels (32-bit stereo I2S): 0 is the speaker loopback, 1 and 3 are the mics, and 2 is unused. Firmware before November 2026 read it as 16-bit stereo, which mixed one mic with the silent loopback. It uses the same protocol as `../taco_satellite.py`, so nothing changes on the Pi side. After the first USB flash, updates go over Wi-Fi (see [Firmware updates over Wi-Fi](#firmware-updates-over-wi-fi)). The LED ring shows when Taco is listening, and the middle key mutes the mic. The speaker isn't used yet.
+This firmware turns the Waveshare ESP32-S3-AUDIO-Board into a Taco mic satellite. It mixes the board's two mics to mono and streams them to taco-voice over Wi-Fi. The ES7210 is read as four 16-bit channels (32-bit stereo I2S): 0 is the speaker loopback, 1 and 3 are the mics, and 2 is unused. Firmware before November 2026 read it as 16-bit stereo, which mixed one mic with the silent loopback. It uses the same protocol as `../taco_satellite.py`, so nothing changes on the Pi side. After the first USB flash, updates go over Wi-Fi (see [Firmware updates over Wi-Fi](#firmware-updates-over-wi-fi)). The LED ring shows when Taco is listening, and the middle key mutes the mic. The speaker plays replies and, through the `MUSIC` stream, music at 48 kHz.
 
 ## One-time setup on the Mac
 ```sh
@@ -92,7 +92,7 @@ A reset while an image is still on trial (its first few seconds after an update)
 For another satellite, pass its name: `deploy/satellite-ota.sh "bedroom"` serves `/srv/taco/satellite/bedroom.bin`, or set `firmware = "..."` in its `[[audio.satellites]]` entry.
 
 ## Control lines from Taco
-taco-voice writes short text lines down the satellite's connection, and the board reads them between audio frames. A satellite that doesn't read them (older firmware, `taco_satellite.py`) just ignores them.
+taco-voice writes short text lines down the satellite's connection, and the board's receive task reads them as they arrive. A satellite that doesn't read them (older firmware, `taco_satellite.py`) just ignores them.
 
 | Line | Meaning |
 |---|---|
@@ -102,8 +102,10 @@ taco-voice writes short text lines down the satellite's connection, and the boar
 | `MUTE on` / `MUTE off` | the kiosk's "stop listening", house-wide. While muted, the board sends silence, so its audio never leaves the room |
 | `UPDATE` | new firmware is waiting; check now |
 | `AFE on` / `AFE off` | switch the speech front end (below); the board saves it and restarts |
-| `AUDIO <n>` + n bytes | reply audio for the board's speaker: 16 kHz mono s16le, paced by Taco |
+| `AUDIO <n>` + n bytes | reply audio for the board's speaker: mono s16le at the handshake's `spk` rate, paced by Taco |
+| `MUSIC <n>` + n bytes | music, in the same format: its own 2 s buffer, mixed with replies |
 | `STOP` | drop reply audio that hasn't played yet (the kiosk's stop button) |
+| `MSTOP` | drop music that hasn't played yet |
 | `VOLUME <0-100>` | speaker volume, sent on connect from `[[audio.satellites]] volume` (default 70) |
 
 On each connection Taco sends the current `MUTE` and `STATE`, so a board that restarts mid-turn catches up. The monitor logs them (`taco is listening (here)`, `mic muted`).
@@ -138,9 +140,14 @@ Build notes:
 - `AFE_RAW_INTERLEAVED` in `main.c` sets how the AFE's multi-channel output is laid out. It's undocumented. Interleaved was checked on the board (the two channels are distinct, and real speech transcribes).
 
 ## Replies on the board's speaker
-A turn that Taco takes on this satellite gets its reply here, through the ES8311 DAC and the board's speaker, rather than in the kitchen. The wake chime plays in both rooms. Alarms, timers and announcements always stay in the kitchen. The handshake says `spk=1` when the speaker is up, and older firmware just keeps the replies in the kitchen. Turn it off with `[audio] satellite_replies = false`.
+A turn that Taco takes on this satellite gets its reply here, through the ES8311 DAC and the board's speaker, rather than in the kitchen. The wake chime plays in both rooms. Timers, alarms and reminders ring in the room they were set from; announcements stay in the kitchen. The handshake says `spk=<rate>` (48000; `spk=1` was the 16 kHz firmware) when the speaker is up, and older firmware just keeps the replies in the kitchen. Turn it off with `[audio] satellite_replies = false`.
 
 - Pins (from Waveshare's demo and community firmware for this board): I2S DOUT is **GPIO16**, the ES8311 is at its default I²C address, and the amp is enabled by **TCA9555 P8, active high**. The ring task switches the amp on with the first audio and off after 300 ms of silence.
-- The speaker shares I2S0 with the mics (full duplex), so it's opened in exactly the mics' format (16 kHz, two 32-bit slots); each mono sample goes into both slots. A different format would reclock the mics.
-- taco-voice resamples replies to 16 kHz and sends 100 ms chunks, about 0.4 s ahead of playback, into a 4 s buffer in PSRAM. After a reply it waits `satellite_lag_s` before dropping Taco's own voice from the mics. There's no barge-in here yet: Taco ignores the living-room mic while it talks.
+- The speaker shares I2S0 with the mics (full duplex), so both run at **48 kHz** in two 32-bit slots; each mono sample goes into both slots. The ES8311 is mono, so music is mono too, but at full bandwidth.
+- The mics are low-passed (127-tap Kaiser FIR, −6 dB at 7.2 kHz) and decimated 3:1 to 16 kHz on the board, so the stream to taco-voice is unchanged. An `i2s` task only drains the DMA ring into a 0.5 s PSRAM buffer; the `mic` task decimates and feeds the front end from there, so its processing can run late without losing audio. `main.c` is built at `-O2` (the rest of the project at `-Og`).
+- With the speech front end on, its AEC cancels the board's own speaker, using the ES7210's loopback channel as the reference. On the bench, music at volume 40 raised the mic stream only ~1–4 dB.
+- Internal RAM is tight: Wi-Fi and lwIP may allocate from PSRAM (`CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP`), and so do mallocs over 4 KB. The `LEVELS` report ends with `heap=<free>K/<largest block>K` of internal RAM, and the load counters `wall` (time for 60 s of frames; above 60 means I2S overruns), `dec`/`feed` (ms per 80 ms frame), and frames `out`/`sent`/`drop`.
+- The handshake also carries `boot` (reset reason), `up` (seconds) and `lost` (why the last connection ended); taco-voice logs them.
+- `satellite/sat_music_test.py` bench-tests the speaker: music (or a tone sweep), a reply chime over it, and the mic level with and without music. Stop taco-voice while it runs.
+- taco-voice resamples replies to the board's rate (polyphase, via scipy) and sends 100 ms chunks, about 0.4 s ahead of playback, into a 4 s buffer in PSRAM. After a reply it waits `satellite_lag_s` before dropping Taco's own voice from the mics. There's no barge-in here yet: Taco ignores the living-room mic while it talks.
 - A new image is now confirmed only once the mics show real signal (about −84 dBFS on the first mic) as well as streaming for 10 s, so a firmware change that breaks the audio path rolls back.

@@ -17,3 +17,11 @@ CONFIG_ESP32S3_INSTRUCTION_CACHE_32KB=y
 # picolibc, which only partly emulates newlib, and with picolibc the image
 # crashed at boot (it rolled back).
 CONFIG_LIBC_NEWLIB=y
+# Music streams to the speaker at 48 kHz (96 KB/s) down the same socket as
+# the control lines. The default 5.7 KB window is only 30 ms of that.
+CONFIG_LWIP_TCP_WND_DEFAULT=11520
+CONFIG_LWIP_TCP_RECVMBOX_SIZE=16
+# Internal RAM runs out otherwise (the LEVELS report shows what's free):
+# let Wi-Fi and lwIP buffers, and mallocs over 4 KB, go to PSRAM.
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096
