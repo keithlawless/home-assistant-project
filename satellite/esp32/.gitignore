@@ -1,4 +1,6 @@
 main/secrets.h
+main/secrets.*.h
+!main/secrets.example.h
 .pio/
 build/
 managed_components/
