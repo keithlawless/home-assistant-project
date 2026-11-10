@@ -25,10 +25,11 @@ class CoreLink:
         self._http = httpx.Client(timeout=3.0)
         threading.Thread(target=self._listen, daemon=True, name="core-ws").start()
 
-    def intent(self, text: str) -> dict[str, Any]:
-        """Ask core's fast path; any failure means 'not handled' so Hermes gets it."""
+    def intent(self, text: str, room: str | None = None) -> dict[str, Any]:
+        """Ask core's fast path; any failure means 'not handled' so Hermes gets it.
+        `room` is where the request was heard, so timers ring there."""
         try:
-            r = self._http.post(f"{self.url}/api/intent", json={"text": text})
+            r = self._http.post(f"{self.url}/api/intent", json={"text": text, "room": room})
             r.raise_for_status()
             return r.json()
         except (httpx.HTTPError, ValueError) as e:

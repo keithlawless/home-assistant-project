@@ -72,12 +72,14 @@ class Assistant:
         self.pending: tuple[Intent, float, str] | None = None
         self._pairing: asyncio.Task | None = None
         self._reindex: asyncio.Task | None = None
+        self.room: str | None = None   # the room the current request was heard in
 
     @property
     def timers(self):
         return self.state.db.timers
 
-    async def handle(self, text: str) -> dict[str, Any]:
+    async def handle(self, text: str, room: str | None = None) -> dict[str, Any]:
+        self.room = room
         intent = parse(text)
         if intent is None and self.pending and time.monotonic() < self.pending[1]:
             # A bare answer to "which one?" -> retry the pending intent with it.
@@ -108,7 +110,7 @@ class Assistant:
     # -- timers --------------------------------------------------------------
 
     async def _do_set_timer(self, seconds: float, label: str | None) -> dict[str, Any]:
-        t = self.timers.add_timer(seconds, label)
+        t = self.timers.add_timer(seconds, label, self.room)
         name = f"{t.label.capitalize()} timer" if t.label else "Timer"
         return _reply(f"{name} set for {say_duration(seconds)}.")
 
@@ -187,11 +189,11 @@ class Assistant:
     # -- alarms and reminders -------------------------------------------------
 
     async def _do_set_alarm(self, at: datetime, label: str | None) -> dict[str, Any]:
-        self.timers.add_alarm(at.timestamp(), label)
+        self.timers.add_alarm(at.timestamp(), label, self.room)
         return _reply(f"Alarm set for {say_clock(at, datetime.now())}.")
 
     async def _do_set_reminder(self, at: datetime, message: str) -> dict[str, Any]:
-        self.timers.add_reminder(at.timestamp(), message)
+        self.timers.add_reminder(at.timestamp(), message, self.room)
         now = datetime.now()
         delta = (at - now).total_seconds()
         when = f"in {say_duration(delta)}" if delta < 3 * 3600 else f"at {say_clock(at, now)}"

@@ -34,3 +34,23 @@ def test_find_by_label_and_persistence(tmp_path):
     assert len(store.find(None, "timer")) == 2
     # Survives a restart.
     assert len(Database(db_path).timers.all()) == 3
+
+
+def test_room_is_kept_and_old_tables_migrate(tmp_path):
+    import sqlite3
+    db_path = tmp_path / "t.db"
+    # A table from before rooms existed.
+    conn = sqlite3.connect(db_path)
+    conn.execute("""CREATE TABLE timers (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL,
+        label TEXT, duration_s REAL, ends_at REAL NOT NULL, state TEXT NOT NULL, remaining_s REAL,
+        message TEXT, created_at REAL NOT NULL, rang_at REAL)""")
+    conn.execute("INSERT INTO timers (kind, ends_at, state, created_at) VALUES ('timer', 1, 'running', 0)")
+    conn.commit()
+    conn.close()
+    store = Database(db_path).timers
+    assert [t.room for t in store.all()] == [None]
+    store.add_alarm(time.time() + 3600, room="bedroom")
+    store.add_reminder(time.time() + 60, "bread", room="")
+    rooms = {t.kind: t.room for t in Database(db_path).timers.all()}
+    assert rooms == {"timer": None, "alarm": "bedroom", "reminder": None}
+    assert store.find(None, "alarm")[0].to_dict()["room"] == "bedroom"

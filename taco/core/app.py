@@ -69,6 +69,7 @@ class State:
         self.station_reading: Reading | None = None
         self.station_error: str | None = None
         self.voice: dict[str, Any] = {"state": "idle"}
+        self.turn_room: tuple[str | None, float] = (None, 0.0)   # last voice request's room, when
         self.refresh_now = asyncio.Event()
         kasa = self.cfg["kasa"]
         self.matter = MatterDriver(self.cfg["matter"]["url"], on_change=self.on_devices_changed)
@@ -517,8 +518,25 @@ async def search_places(q: str) -> list[dict[str, Any]]:
 
 @app.post("/api/intent")
 async def intent(body: dict[str, Any]) -> dict[str, Any]:
-    """Fast path for taco-voice: handle common requests without the LLM."""
-    return await state.assistant.handle(body.get("text", ""))
+    """Fast path for taco-voice: handle common requests without the LLM.
+    body: {"text", optional "room" the request was heard in}."""
+    room = body.get("room") or None
+    state.turn_room = (room, time.monotonic())
+    return await state.assistant.handle(body.get("text", ""), room)
+
+
+TURN_ROOM_S = 300   # how long a voice turn's room counts for Hermes's tool calls
+
+
+def _room(body: dict[str, Any]) -> str | None:
+    """The room a new timer, alarm or reminder rings in. Hermes's tools send
+    "turn": the room of the voice request being answered (taco-voice always
+    asks /api/intent before Hermes). The touchscreen sends none: the kitchen."""
+    room = body.get("room")
+    if room == "turn":
+        last, at = state.turn_room
+        return last if last and time.monotonic() - at < TURN_ROOM_S else None
+    return room or None
 
 
 # --- timers, alarms, reminders (used by the UI and by taco-mcp for Hermes) ---
@@ -537,7 +555,7 @@ async def list_timers() -> list[dict[str, Any]]:
 @app.post("/api/timers")
 async def create_timer(body: dict[str, Any]) -> dict[str, Any]:
     try:
-        t = state.db.timers.add_timer(float(body["seconds"]), body.get("label"))
+        t = state.db.timers.add_timer(float(body["seconds"]), body.get("label"), _room(body))
     except (KeyError, ValueError) as e:
         raise HTTPException(400, f"bad timer: {e}") from None
     await state.broadcast_timers()
@@ -553,7 +571,7 @@ async def create_alarm(body: dict[str, Any]) -> dict[str, Any]:
         at = when.timestamp()
     else:
         raise HTTPException(400, "give 'at' (epoch seconds) or a 'time' like '7:30 am'")
-    t = state.db.timers.add_alarm(at, body.get("label"))
+    t = state.db.timers.add_alarm(at, body.get("label"), _room(body))
     await state.broadcast_timers()
     return t.to_dict()
 
@@ -564,7 +582,7 @@ async def create_reminder(body: dict[str, Any]) -> dict[str, Any]:
     if not body.get("message"):
         raise HTTPException(400, "reminder needs a message")
     at = float(body["at"]) if "at" in body else time.time() + float(body.get("in_seconds", 0))
-    t = state.db.timers.add_reminder(at, body["message"])
+    t = state.db.timers.add_reminder(at, body["message"], _room(body))
     await state.broadcast_timers()
     return t.to_dict()
 
