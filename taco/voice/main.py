@@ -210,11 +210,11 @@ class VoiceLoop:
         tune = w["rooms"].get(room, {})
         # The verifier scores candidates from the near-miss floor up, so it needs one.
         verifier = verifier_path(w["model"], w["verifier"])
-        floor = w["near_miss"] if w["save_clips"] or verifier else None
+        floor = tune.get("near_miss", w["near_miss"]) if w["save_clips"] or verifier else None
         wake = WakeWord(w["model"], w["threshold"], tune.get("offset", 0.0), tune.get("patience", w["patience"]),
                         floor, verifier, w["verifier_threshold"], w["verifier_enforce"])
-        log.info("wake word %s for %s: threshold %.2f, patience %d",
-                 wake.name, mic_name or room, wake.threshold, wake.patience)
+        log.info("wake word %s for %s: threshold %.2f, patience %d, candidates from %s",
+                 wake.name, mic_name or room, wake.threshold, wake.patience, floor)
         return wake
 
     # -- voice and settings ------------------------------------------------------

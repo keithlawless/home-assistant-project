@@ -51,6 +51,9 @@ DEFAULTS: dict = {
         #   [wake.rooms."living room"]
         #   offset = 0.1    # added to the threshold
         #   patience = 3    # overrides [wake] patience
+        #   near_miss = 0.1 # overrides [wake] near_miss: a far-off voice
+        #                   # (bedroom, 2026-11-16) can peak under 0.2 and
+        #                   # never reach the verifier
         "rooms": {},
         # Speech in the kitchen also reaches a satellite in the next room. When
         # the local mic heard a satellite's wake at least local_priority_db

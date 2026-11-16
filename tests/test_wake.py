@@ -338,3 +338,18 @@ def test_front_end_faint_wake_stays_put_when_the_kitchen_heard_less():
     satellite.afe = "on"
     score, detector, listener = loop._detect_wake(now=0.0)
     assert detector[0] is satellite and listener[0] is satellite and loop._deferred is None
+
+
+def test_room_can_lower_its_candidate_floor(monkeypatch):
+    import taco.voice.main as vm
+    made = []
+    monkeypatch.setattr(vm, "WakeWord", lambda *a: made.append(a) or type("W", (), {
+        "name": "w", "threshold": 0.5, "patience": 2})())
+    monkeypatch.setattr(vm, "verifier_path", lambda *a: "v.pkl")
+    loop = vm.VoiceLoop.__new__(vm.VoiceLoop)
+    loop.cfg = {"wake": {"model": "m.onnx", "threshold": 0.5, "patience": 2, "near_miss": 0.2,
+                         "save_clips": True, "verifier": "auto", "verifier_threshold": 0.5,
+                         "verifier_enforce": True, "rooms": {"bedroom": {"near_miss": 0.1}}}}
+    loop._wake_for("bedroom")
+    loop._wake_for("kitchen")
+    assert [a[4] for a in made] == [0.1, 0.2]
