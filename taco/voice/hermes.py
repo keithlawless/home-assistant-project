@@ -69,16 +69,20 @@ class HermesClient:
         self._http = httpx.Client(headers=headers, timeout=httpx.Timeout(timeout_s, connect=5.0))
         self._history: list[dict] = []
         self._last_turn = 0.0
+        self._room: str | None = None
         self._response: httpx.Response | None = None
 
-    def _messages(self, text: str) -> list[dict]:
-        if time.monotonic() - self._last_turn > self.history_ttl_s:
+    def _messages(self, text: str, room: str | None) -> list[dict]:
+        # Context carries over only for a follow-up in the same room: a
+        # request from another room is someone else, or a new topic.
+        if time.monotonic() - self._last_turn > self.history_ttl_s or room != self._room:
             self._history = []
         return [*self._history, {"role": "user", "content": text}]
 
-    def ask(self, text: str, on_tool: Callable[[dict], None] | None = None) -> Iterator[str]:
+    def ask(self, text: str, on_tool: Callable[[dict], None] | None = None,
+            room: str | None = None) -> Iterator[str]:
         """Send one user turn; yield cleaned sentences of the reply."""
-        messages = self._messages(text)
+        messages = self._messages(text, room)
         payload = {"model": self.model, "stream": True, "messages": messages}
         full_reply, buffer, event = [], "", None
 
@@ -118,6 +122,7 @@ class HermesClient:
             yield tail
         self._history = [*messages, {"role": "assistant", "content": "".join(full_reply).strip()}]
         self._last_turn = time.monotonic()
+        self._room = room
 
     def abort(self) -> None:
         """Cancel the in-flight reply from another thread (stop button, barge-in).

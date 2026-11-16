@@ -28,3 +28,14 @@ def test_asks_question():
     assert not asks_question("Why not? Tomatoes like heat. Water them daily.")
     assert not asks_question("It's 57 degrees.")
     assert not asks_question("")
+
+
+def test_history_stays_in_its_room():
+    from taco.voice.hermes import HermesClient
+    h = HermesClient("http://hermes.invalid", None)
+    h._history = [{"role": "user", "content": "I'm not feeling well."},
+                  {"role": "assistant", "content": "Are you okay?"}]
+    h._last_turn, h._room = __import__("time").monotonic(), "kitchen"
+    assert len(h._messages("Yes.", "kitchen")) == 3          # follow-up keeps context
+    assert h._messages("On the bedroom.", "bedroom") == [     # another room starts fresh
+        {"role": "user", "content": "On the bedroom."}]

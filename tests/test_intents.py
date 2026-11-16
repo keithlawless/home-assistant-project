@@ -131,6 +131,8 @@ def test_say_helpers():
     ("Living room lamps on", True, "living room lamps"),
     ("Please turn off all the lights", False, "all the lights"),
     ("Lights out", False, "everything"),
+    ("On the bedroom.", True, "the bedroom"),       # "turn" lost in a quiet room
+    ("Off living room", False, "living room"),
 ])
 def test_power(text, on, target):
     i = p(text)

@@ -550,7 +550,10 @@ def _device_intent(text: str) -> Intent | None:
             return Intent("device_status", {"target": m.group("t")})
     m = (re.fullmatch(r"(?:turn|switch|shut|power) (?P<onoff>on|off) (?P<t>.+)", text)
          or re.fullmatch(r"(?:turn|switch|shut|power) (?P<t>.+?) (?P<onoff>on|off)", text)
-         or re.fullmatch(r"(?P<t>.+?) (?P<onoff>on|off)", text))
+         or re.fullmatch(r"(?P<t>.+?) (?P<onoff>on|off)", text)
+         # Whisper drops a quiet "turn": "On the bedroom." A target that
+         # matches no device still goes to Hermes ("on my way").
+         or re.fullmatch(r"(?P<onoff>on|off) (?P<t>.+)", text))
     if m and m.group("t") not in _PRONOUNS and len(m.group("t").split()) <= 6:
         return Intent("power", {"on": m.group("onoff") == "on", "target": m.group("t")})
 
