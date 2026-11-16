@@ -610,6 +610,9 @@ class VoiceLoop:
             fast = self.core.intent(text, _room(self.active[0]))
             if fast.get("handled"):
                 log.info("fast path (%.2fs): %r", time.monotonic() - t0, fast.get("speech"))
+                # A command handled here ends whatever Hermes was talking
+                # about; Hermes never saw it, so its old context would mislead.
+                self.hermes.reset()
                 reply, barged = self.say(fast.get("speech") or "") if not fast.get("silent") else ("", False)
             else:
                 if self.ack_audio:
@@ -646,7 +649,9 @@ class VoiceLoop:
         self.cancel.clear()
         with BargeIn(self) as barge:
             try:
-                for sentence in self.hermes.ask(text, on_tool=lambda e: self.events.send("tool", **e)):
+                room = _room(self.active[0])
+                tool = lambda e: self.events.send("tool", **e)  # noqa: E731
+                for sentence in self.hermes.ask(text, on_tool=tool, room=room):
                     if self.cancel.is_set():
                         log.info("reply cancelled")
                         break  # closes the stream; Hermes stops generating
