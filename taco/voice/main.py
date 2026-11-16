@@ -406,10 +406,13 @@ class VoiceLoop:
             return False
         margin = self._local_margin(wake)
         # With the front end on, a wake the satellite heard only faintly came
-        # from another room, however the margin reads (the kitchen mic's own
-        # level swings with music and its auto gain).
+        # from the kitchen, however high the margin reads (the kitchen mic's
+        # own level swings with music and its auto gain). The kitchen must
+        # still have heard it louder (local_priority_db): quiet speech in a
+        # room far from the kitchen, like the bedroom, is faint everywhere,
+        # and handing it to the kitchen mic loses the request.
         level = wake.level_db()
-        faint = afe and level < w["afe_faint_db"]
+        faint = afe and level < w["afe_faint_db"] and margin >= w["local_priority_db"]
         if margin < limit and not faint:
             return False
         if self._deferred:

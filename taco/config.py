@@ -77,6 +77,9 @@ DEFAULTS: dict = {
         # satellite heard it only at -49..-55 dBFS, against -35..-45 from the
         # couch (2026-11-09). Fainter than this, it waits for the kitchen and,
         # if the kitchen doesn't wake, takes the request from the kitchen mic.
+        # This needs the kitchen to have heard it at least local_priority_db
+        # louder: bedroom speech is faint (-49..-69 dBFS) with the kitchen
+        # 12-40 dB quieter (2026-11-11).
         "afe_faint_db": -48.0,
         # Keep a short clip of every wake and near miss, for tuning and
         # retraining (taco/voice/clips.py). Near misses are runs that peak at

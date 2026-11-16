@@ -328,3 +328,13 @@ def test_front_end_couch_speech_is_not_faint():
     loop, mic, satellite = _loop_with(2900, 600)   # ~14 dB margin; satellite ~ -35 dBFS
     satellite.afe = "on"
     assert loop._detect_wake(now=0.0)[2][0] is satellite
+
+
+def test_front_end_faint_wake_stays_put_when_the_kitchen_heard_less():
+    """Quiet bedroom speech reads -49..-69 dBFS on the satellite, but the
+    kitchen hears it 12-40 dB quieter still: the satellite keeps the turn
+    instead of handing the request to a kitchen mic that can't hear it."""
+    loop, mic, satellite = _loop_with(20, 82)      # ~-12 dB margin; satellite ~ -52 dBFS
+    satellite.afe = "on"
+    score, detector, listener = loop._detect_wake(now=0.0)
+    assert detector[0] is satellite and listener[0] is satellite and loop._deferred is None
