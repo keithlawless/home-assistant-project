@@ -404,6 +404,10 @@ class VoiceLoop:
         limit = w["afe_local_priority_db" if afe else "local_priority_db"]
         if mic is self.listeners[0][0] or not limit:
             return False
+        if self.listeners[0][0].stuck:
+            # A stuck local mic reads loud all the time, so every satellite
+            # wake would wait for it, then record the request from its noise.
+            return False
         margin = self._local_margin(wake)
         # With the front end on, a wake the satellite heard only faintly came
         # from the kitchen, however high the margin reads (the kitchen mic's
@@ -508,6 +512,9 @@ class VoiceLoop:
             time.sleep(1.0)
             for mic, _ in self.listeners:
                 mic.check_stall()
+                if (stuck := mic.check_stuck()) is not None:
+                    self.events.send("mic_health", mic=mic.name, stuck=stuck,
+                                     local=mic is self.listeners[0][0])
             for sat in self._satellites():
                 sat.check_firmware()
                 sat.check_afe()

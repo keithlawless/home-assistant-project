@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 
 import numpy as np
 
@@ -15,6 +16,17 @@ _HALLUCINATIONS = {"", "you", "thank you.", "thanks for watching!", "bye.", "."}
 
 # Whisper's prompt holds 224 tokens; a short word list leaves plenty of room.
 MAX_VOCABULARY = 40
+
+
+def echoes_prompt(text: str, vocabulary: list[str]) -> bool:
+    """Whether `text` is only words from Whisper's prompt ("Hey Taco." plus
+    the vocabulary). Given noise, Whisper repeats its prompt: a stuck kitchen
+    mic came out as just the home town's name and got a weather report
+    (2026-11-21).
+    Nobody asks Taco anything with just a place name."""
+    words = re.findall(r"[a-z']+", text.lower())
+    prompt = set(re.findall(r"[a-z']+", " ".join(["hey taco", *vocabulary]).lower()))
+    return bool(words) and all(w in prompt for w in words)
 
 
 def build_vocabulary(location: dict | None, extra: list[str]) -> list[str]:
@@ -60,4 +72,6 @@ class Transcriber:
             hotwords=words or None,
         )
         text = " ".join(s.text.strip() for s in segments).strip()
-        return "" if text.lower() in _HALLUCINATIONS else text
+        if text.lower() in _HALLUCINATIONS or echoes_prompt(text, self.vocabulary):
+            return ""
+        return text

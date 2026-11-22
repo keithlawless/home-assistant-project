@@ -172,6 +172,7 @@ class FakeMic:
     def __init__(self, name, frames=()):
         self.name = name
         self.frames = list(frames)
+        self.stuck = False
 
     def read_nowait(self):
         return self.frames.pop(0) if self.frames else None
@@ -232,6 +233,16 @@ def test_satellite_wake_fires_at_once_when_speech_is_in_its_room():
     assert loop._detect_wake(now=0.0)[1][0] is satellite
     loop, mic, satellite = _loop_with(4000, 300, limit=0)   # off
     assert loop._detect_wake(now=0.0)[1][0] is satellite
+
+
+def test_satellite_wake_skips_a_stuck_kitchen_mic():
+    # 2026-11-21: the kitchen mic sent a steady hum, so every satellite wake
+    # read 30-50 dB "louder" in the kitchen and was handed to its noise.
+    loop, mic, satellite = _loop_with(3200, 300)
+    mic.stuck = True
+    score, detector, listener = loop._detect_wake(now=0.0)
+    assert detector[0] is satellite and listener[0] is satellite
+    assert loop._deferred is None
 
 
 def test_local_mic_never_waits():
