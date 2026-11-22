@@ -32,6 +32,13 @@ log = logging.getLogger(__name__)
 
 FRAME_SAMPLES = 1280  # 80 ms at 16 kHz
 STALL_S = 3.0         # a live source this quiet has stopped streaming
+# A mic whose quietest frame stays above STUCK_DB for STUCK_S isn't hearing
+# the room. On 2026-11-21 the kitchen EMEET locked up sending a steady
+# 124 Hz hum at -13.5 dBFS for a day; a working one drops under -50 dBFS
+# between words even in the noisiest saved kitchen clip (music, a busy room).
+STUCK_DB = -40.0
+STUCK_S = 60.0
+_STUCK_POWER = (10 ** (STUCK_DB / 20) * 32768) ** 2   # mean square at STUCK_DB
 
 
 def _target_args(device: str | None) -> list[str]:
@@ -49,6 +56,8 @@ class _FrameSource:
         self.frames: queue.Queue[np.ndarray] = queue.Queue(maxsize=200)
         self.last_frame: float | None = None   # time.monotonic() of the newest frame
         self._stalled_since: float | None = None
+        self._last_quiet: float | None = None  # newest frame under STUCK_DB
+        self.stuck = False
 
     @property
     def live(self) -> bool:
@@ -70,10 +79,31 @@ class _FrameSource:
             log.info("mic %r: audio back after %.0f s", self.name, now - self._stalled_since)
             self._stalled_since = None
 
+    def check_stuck(self, now: float | None = None) -> bool | None:
+        """Whether the source just became stuck (True) or came unstuck
+        (False): loud for STUCK_S without one quiet frame, which no room
+        does, so it's sending noise rather than sound. None = no change."""
+        if self.last_frame is None or self._last_quiet is None:
+            return None
+        loud_s = self.last_frame - self._last_quiet
+        if not self.stuck and loud_s >= STUCK_S:
+            self.stuck = True
+            log.warning("mic %r: stuck, no frame under %.0f dBFS for %.0f s", self.name, STUCK_DB, loud_s)
+            return True
+        if self.stuck and loud_s < STUCK_S:
+            self.stuck = False
+            log.info("mic %r: hearing the room again", self.name)
+            return False
+        return None
+
     def _put(self, chunk: bytes) -> None:
         self.last_frame = time.monotonic()
+        frame = np.frombuffer(chunk, dtype=np.int16)
+        f = frame.astype(np.float32)
+        if self._last_quiet is None or float(np.dot(f, f)) / max(len(f), 1) < _STUCK_POWER:
+            self._last_quiet = self.last_frame
         try:
-            self.frames.put_nowait(np.frombuffer(chunk, dtype=np.int16))
+            self.frames.put_nowait(frame)
         except queue.Full:
             pass  # consumer is busy (e.g. during STT); drop rather than block
         if self.ready:

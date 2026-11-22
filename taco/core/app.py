@@ -278,6 +278,22 @@ class State:
                 log.exception("health check failed")
             await asyncio.sleep(self.health.interval_s)
 
+    async def mic_health(self, mic: str, stuck: bool, local: bool) -> None:
+        """taco-voice found a mic sending steady noise (or hearing again)."""
+        key = f"health:mic:{mic}"
+        if not stuck:
+            log.info("health: %s mic back to normal", mic)
+            if self.notifications.resolve(key):
+                await self.broadcast_notifications()
+            return
+        log.warning("health: %s mic is stuck", mic)
+        body = ("It has sent the same loud noise for a minute, so it can't hear anyone. "
+                + ("Hold the speakerphone's power button until its light goes off, then turn it back on "
+                   "(unplugging isn't enough: it has a battery). " if local else
+                   "Restart that satellite (unplug it for a few seconds). ")
+                + "Other rooms keep working meanwhile.")
+        await self.notify("health", f"The {mic} mic is stuck", body, key=key, merge_s=None)
+
     def events_on(self, day) -> list[dict[str, Any]]:
         return [e for e in self.events if e["date"] == day.isoformat()]
 
@@ -1237,6 +1253,10 @@ async def screen(body: dict[str, Any]) -> dict[str, bool]:
 @app.post("/api/voice/event")
 async def voice_event(event: dict[str, Any]) -> dict[str, bool]:
     """State updates from taco-voice: listening, heard text, tool use, reply."""
+    if event.get("type") == "mic_health":
+        # A health card, not a voice event: the screen shouldn't wake for it.
+        await state.mic_health(str(event.get("mic") or "a"), bool(event.get("stuck")), bool(event.get("local")))
+        return {"ok": True}
     if event.get("type") == "state":
         state.voice = {"state": event.get("state", "idle")}
         # Turn music down while Taco is listening or talking, in a room
