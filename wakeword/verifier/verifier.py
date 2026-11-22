@@ -107,7 +107,7 @@ def label(args) -> None:
         preroll = " ".join(s.text.strip() for s in segments).strip()
         tag, why = guess(meta, preroll)
         rows[clip] = {"clip": clip, "room": meta["room"], "score": meta.get("score", meta.get("peak")),
-                      "label": tag, "why": why, "preroll": preroll, "heard": meta.get("heard", "")}
+                      "label": tag, "why": why, "preroll": preroll, "heard": meta.get("heard") or ""}
         print(f"{tag:4} {clip:45} {why:26} | {preroll[:40]:40} | {rows[clip]['heard'][:40]}")
     write_labels(path, rows)
     print(f"\n{len(todo)} new; review the label column in {path} (pos, neg or skip), then run train")
