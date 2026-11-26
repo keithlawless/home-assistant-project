@@ -54,6 +54,9 @@ DEFAULTS: dict = {
         #   near_miss = 0.1 # overrides [wake] near_miss: a far-off voice
         #                   # (bedroom, 2026-11-16) can peak under 0.2 and
         #                   # never reach the verifier
+        #   hears_kitchen = false # out of earshot of the kitchen (upstairs):
+        #                   # a faint wake here never goes to the kitchen mic
+        #                   # (see afe_faint_db)
         "rooms": {},
         # Speech in the kitchen also reaches a satellite in the next room. When
         # the local mic heard a satellite's wake at least local_priority_db

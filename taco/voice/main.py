@@ -415,8 +415,14 @@ class VoiceLoop:
         # still have heard it louder (local_priority_db): quiet speech in a
         # room far from the kitchen, like the bedroom, is faint everywhere,
         # and handing it to the kitchen mic loses the request.
+        # A room out of earshot of the kitchen ([wake.rooms] hears_kitchen =
+        # false, e.g. the bedroom upstairs) never gets kitchen speech: there a
+        # faint wake is a far-off voice, and a loud kitchen is the TV
+        # downstairs (2026-11-25: TV at +14 dB took a bedroom request).
         level = wake.level_db()
-        faint = afe and level < w["afe_faint_db"] and margin >= w["local_priority_db"]
+        hears_kitchen = w.get("rooms", {}).get(_room(mic), {}).get("hears_kitchen", True)
+        faint = (afe and hears_kitchen and level < w["afe_faint_db"]
+                 and margin >= w["local_priority_db"])
         if margin < limit and not faint:
             return False
         if self._deferred:

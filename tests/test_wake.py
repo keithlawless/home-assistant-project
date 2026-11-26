@@ -351,6 +351,18 @@ def test_front_end_faint_wake_stays_put_when_the_kitchen_heard_less():
     assert detector[0] is satellite and listener[0] is satellite and loop._deferred is None
 
 
+def test_front_end_faint_wake_stays_put_in_a_room_out_of_earshot_of_the_kitchen():
+    """2026-11-25: the user upstairs in the bedroom, the TV loud downstairs.
+    The kitchen read +14 dB over a faint (-48 dBFS) bedroom wake, and the
+    request went to the kitchen mic and came back garbled. A room marked
+    hears_kitchen = false keeps its own faint wakes."""
+    loop, mic, satellite = _loop_with(1000, 82)    # ~22 dB margin; satellite ~ -52 dBFS
+    satellite.afe = "on"
+    loop.cfg["wake"]["rooms"] = {"living room": {"hears_kitchen": False}}
+    score, detector, listener = loop._detect_wake(now=0.0)
+    assert detector[0] is satellite and listener[0] is satellite and loop._deferred is None
+
+
 def test_room_can_lower_its_candidate_floor(monkeypatch):
     import taco.voice.main as vm
     made = []
